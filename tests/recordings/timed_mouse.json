@@ -1,0 +1,65 @@
+{
+  "version": 2,
+  "groups": [
+    {
+      "window": null,
+      "recorded_rect": null,
+      "events": [
+        {
+          "type": "mouse_move_timed",
+          "ts": 0.0,
+          "x": 1704,
+          "y": 400,
+          "dx": -1134,
+          "dy": -9,
+          "duration": 0.5
+        },
+        {
+          "type": "mouse_move_timed",
+          "ts": 0.0,
+          "x": 1704,
+          "y": 400,
+          "dx": -1134,
+          "dy": -9,
+          "duration": 0.5
+        },
+        {
+          "type": "mouse_move_timed",
+          "ts": 0.0,
+          "x": 1704,
+          "y": 400,
+          "dx": -1134,
+          "dy": -9,
+          "duration": 0.5
+        },
+        {
+          "type": "mouse_move_timed",
+          "ts": 0.0,
+          "x": 1704,
+          "y": 400,
+          "dx": -1134,
+          "dy": -9,
+          "duration": 0.5
+        },
+        {
+          "type": "mouse_move_timed",
+          "ts": 0.0,
+          "x": 1704,
+          "y": 400,
+          "dx": -1134,
+          "dy": -9,
+          "duration": 0.5
+        },
+        {
+          "type": "mouse_move_timed",
+          "ts": 0.0,
+          "x": 1704,
+          "y": 400,
+          "dx": -1134,
+          "dy": -9,
+          "duration": 0.5
+        }
+      ]
+    }
+  ]
+}
