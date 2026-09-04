@@ -1,11 +1,11 @@
 import collections
 import copy
 import threading
+import time
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-import pyautogui
 from macro_recorder.bundling import bundle_events
 from macro_recorder.event_types import EventType
 from macro_recorder.expressions import ExpressionError, evaluate
@@ -24,6 +24,12 @@ from macro_recorder.player import (
 
 
 TABS = ["Record", "Playback", "Help"]
+
+_HELP_TEXT = (
+    "F6 stop recording   Esc stop playback   Del delete rows   "
+    "Ctrl+C / Ctrl+V copy / paste   Alt+\u2191 / Alt+\u2193 move rows   "
+    "double-click Label to rename"
+)
 TABLE_COLUMNS = ("num", "Action", "Value", "Label")
 TABLE_COL_WIDTHS = {"num": 36, "Action": 160, "Value": 200, "Label": 150}
 
@@ -176,6 +182,9 @@ class MacroRecorderApp:
         # thread highlight pump drains them into the (collapsible) log panel.
         self._log_queue: collections.deque = collections.deque(maxlen=_LOG_QUEUE_MAX)
         self._log_visible: bool = True
+        # Footer elapsed-time clock, ticked on the main thread during playback.
+        self._play_started: float = 0.0
+        self._timer_after_id: str | None = None
 
         # Screen overlay that previews the selected action.
         self._overlay = OverlayRenderer(root)
@@ -305,10 +314,8 @@ class MacroRecorderApp:
                 tk.Checkbutton(win_group, text="Debug highlight", variable=self._debug_highlight_var).pack(side=tk.LEFT)
 
             elif name == "Help":
-                tk.Button(
-                    frame, text="Debug Help",
-                    command=lambda: print("[debug] tab=Help"),
-                ).pack(side=tk.LEFT, padx=6)
+                tk.Label(frame, text=_HELP_TEXT, justify=tk.LEFT, anchor="w").pack(
+                    side=tk.LEFT, padx=6)
 
             self.options_frames[name] = frame
 
@@ -358,6 +365,8 @@ class MacroRecorderApp:
         self.table.bind("<Delete>",           lambda _: self._delete_row())
         self.table.bind("<Control-c>",        lambda _: self._copy_rows())
         self.table.bind("<Control-v>",        lambda _: self._paste_rows())
+        self.table.bind("<Alt-Up>",           lambda _: self._move_rows(-1))
+        self.table.bind("<Alt-Down>",         lambda _: self._move_rows(1))
         self.table.bind("<<TreeviewSelect>>", lambda _: self._on_selection_change())
         # Note: the overlay auto-hides when the application loses focus — that is
         # owned by OverlayRenderer itself, so it covers every kind of drawing.
@@ -632,6 +641,8 @@ class MacroRecorderApp:
         self._play_btn.config(state=tk.DISABLED)
         self._stop_play_btn.config(state=tk.NORMAL)
         self._pump_highlight()   # main-thread pump that drains the active queue
+        self._play_started = time.monotonic()
+        self._tick_timer()
 
         # Start debug output if enabled
         if self._debug_highlight_var.get():
@@ -661,6 +672,10 @@ class MacroRecorderApp:
         if self._debug_timer:
             self.root.after_cancel(self._debug_timer)
             self._debug_timer = None
+        if self._timer_after_id:
+            self.root.after_cancel(self._timer_after_id)
+            self._timer_after_id = None
+        self._update_timer_label()
         self._clear_playing_highlight()
         # Flush any log lines that arrived after the pump's last tick.
         self._drain_log_queue()
@@ -1026,21 +1041,11 @@ class MacroRecorderApp:
             # For timed moves dx/dy hold the absolute To-coordinate (not a delta).
             new_event = MacroEvent(type=EventType.MOUSE_MOVE_TIMED, ts=next_ts, x=100, y=100, dx=200, dy=200, duration=_DEFAULT_MOVE_DURATION_S)
         elif action_type == "mouse_click":
-            # Create both down and up events together
-            new_events = [
+            # A click is a bundled down/up pair in one row.
+            self._insert_row_group([
                 MacroEvent(type=EventType.MOUSE_CLICK, ts=next_ts, button="left", pressed=True, x=100, y=100),
-                MacroEvent(type=EventType.MOUSE_CLICK, ts=next_ts + _CLICK_PAIR_GAP_S, button="left", pressed=False, x=100, y=100)
-            ]
-            # Insert as bundle
-            sel = self.table.selection()
-            index = self.table.index(sel[0]) + 1 if sel else tk.END
-            value = "left @ (100, 100)"
-            iid = self.table.insert("", index, values=("", _action_label(EventType.MOUSE_CLICK), value, ""))
-            self._row_events[iid] = new_events
-            self._refresh_after_mutation()
-            self.table.selection_set(iid)
-            self.table.see(iid)
-            self.set_action_count(sum(1 for iid in self.table.get_children() if iid in self._row_events))
+                MacroEvent(type=EventType.MOUSE_CLICK, ts=next_ts + _CLICK_PAIR_GAP_S, button="left", pressed=False, x=100, y=100),
+            ])
             return
         elif action_type == "mouse_click_down":
             new_event = MacroEvent(type=EventType.MOUSE_CLICK, ts=next_ts, button="left", pressed=True, x=100, y=100)
@@ -1073,18 +1078,17 @@ class MacroRecorderApp:
         elif action_type == "goto_if":
             new_event = MacroEvent(type=EventType.GOTO_IF, ts=next_ts, expr="x > 0", target=GOTO_END)
 
-        if not new_event:
-            return
+        if new_event:
+            self._insert_row_group([new_event])
 
-        # Insert the new event into the table
+    def _insert_row_group(self, group: list[MacroEvent]) -> None:
+        """Insert one row after the current selection (or at the end) and select it."""
         sel = self.table.selection()
         index = self.table.index(sel[0]) + 1 if sel else tk.END
-
-        # Format value for display
-        value = self._format_value(new_event)
-        iid = self.table.insert("", index, values=("", _action_label(new_event.type), value, ""))
-        self._row_events[iid] = [new_event]
-
+        first = group[0]
+        iid = self.table.insert("", index, values=(
+            "", _action_label(first.type), self._format_row_value(group), first.label or ""))
+        self._row_events[iid] = group
         self._refresh_after_mutation()
         self.table.selection_set(iid)
         self.table.see(iid)
@@ -1139,25 +1143,25 @@ class MacroRecorderApp:
         self.table.see(new_iids[-1])
         self.set_action_count(sum(1 for iid in self.table.get_children() if iid in self._row_events))
 
-    def _move_row_up(self) -> None:
-        sel = self.table.selection()
+    def _move_rows(self, delta: int) -> str:
+        """Shift the selected rows one place up (delta -1) or down (delta +1)."""
+        selected = set(self.table.selection())
+        children = list(self.table.get_children())
+        sel = [i for i in children if i in selected]
         if not sel:
-            return
-        iid = sel[0]
-        prev = self.table.prev(iid)
-        if prev:
-            self.table.move(iid, "", self.table.index(prev))
-            self._refresh_after_mutation()
-
-    def _move_row_down(self) -> None:
-        sel = self.table.selection()
-        if not sel:
-            return
-        iid = sel[0]
-        nxt = self.table.next(iid)
-        if nxt:
-            self.table.move(iid, "", self.table.index(nxt))
-            self._refresh_after_mutation()
+            return "break"
+        if delta < 0 and self.table.index(sel[0]) == 0:
+            return "break"
+        if delta > 0 and self.table.index(sel[-1]) == len(children) - 1:
+            return "break"
+        # Move top-down when going up and bottom-up when going down so rows in a
+        # block never leapfrog each other.
+        for iid in (sel if delta < 0 else reversed(sel)):
+            self.table.move(iid, "", self.table.index(iid) + delta)
+        self._refresh_after_mutation()
+        self.table.selection_set(sel)
+        self.table.see(sel[0] if delta < 0 else sel[-1])
+        return "break"
 
     @staticmethod
     def _adjust_colour(hex_colour: str, factor: float) -> str:
@@ -1345,6 +1349,18 @@ class MacroRecorderApp:
     def set_elapsed_time(self, time_str: str) -> None:
         self.elapsed_time = time_str
         self.timer_label.config(text=time_str)
+
+    def _update_timer_label(self) -> None:
+        secs = int(time.monotonic() - self._play_started)
+        self.set_elapsed_time("%02d:%02d:%02d" % (secs // 3600, secs % 3600 // 60, secs % 60))
+
+    def _tick_timer(self) -> None:
+        """Main-thread: refresh the footer clock while playback runs."""
+        if not self._playing:
+            self._timer_after_id = None
+            return
+        self._update_timer_label()
+        self._timer_after_id = self.root.after(250, self._tick_timer)
 
     # ---------------------------------------------------------- screen overlay
 

@@ -900,7 +900,7 @@ class Player:
         """
         try:
             key_obj = deserialize_key(key_str)
-        except (ValueError, Exception) as e:
+        except Exception as e:
             log.warning("Unknown key %r in macro — skipping. (%s)", key_str, e)
             return
 
