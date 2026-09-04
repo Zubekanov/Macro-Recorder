@@ -75,6 +75,7 @@ The recorder keeps a flat stream from pynput plus `window_focus` markers from th
 
 - Rows are bundles: a click down/up pair, a run of moves, or a run of same-direction scrolls is one row. `bundling.py` decides.
 - The Details panel is rebuilt per event type and syncs to the event on every keystroke. Window rows expose the title, match mode and launch command; those travel on the `window_focus` row event and become group fields on save.
+- Undo/redo (Ctrl+Z / Ctrl+Y) keeps whole-table snapshots in `undo.py`, pushed before every mutation. Keystrokes in the Details panel on one row coalesce into one step; selecting another row starts a new one. Recording suspends snapshots while rows stream in, so a recording undoes as a single step.
 - Active-row highlight during playback uses Treeview selection. The player thread enqueues rows, a 50 ms main-thread pump paints one per tick.
 - The targeting button installs a global mouse hook and swallows the click via a Win32 event filter.
 

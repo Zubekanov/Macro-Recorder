@@ -12,6 +12,7 @@ from macro_recorder.expressions import evaluate
 from macro_recorder.macro import MacroEvent, MacroGroup, load_macro, save_macro
 from macro_recorder.overlay_renderer import OverlayRenderer
 from macro_recorder.table_model import TableModel
+from macro_recorder.undo import UndoStack
 from macro_recorder.recorder import Recorder
 from macro_recorder.window_manager import MATCH_MODES, MATCH_SUBSTRING
 from macro_recorder.player import (
@@ -28,7 +29,8 @@ TABS = ["Record", "Playback", "Help"]
 
 _HELP_TEXT = (
     "F6 stop recording   Esc stop playback   Del delete rows   "
-    "Ctrl+C / Ctrl+V copy / paste   Alt+\u2191 / Alt+\u2193 move rows   "
+    "Ctrl+Z / Ctrl+Y undo / redo   Ctrl+C / Ctrl+V copy / paste   "
+    "Alt+\u2191 / Alt+\u2193 move rows   "
     "double-click Label to rename"
 )
 TABLE_COLUMNS = ("num", "Action", "Value", "Label")
@@ -55,6 +57,8 @@ _ACTIVE_QUEUE_MAX: int = 64
 # Cap on buffered log lines awaiting paint, and on lines kept in the panel.
 _LOG_QUEUE_MAX: int = 5000
 _LOG_PANEL_MAX_LINES: int = 5000
+# Undo history depth (table snapshots).
+_UNDO_DEPTH: int = 100
 
 # Light, gentle background colours assigned per distinct window scope.
 _WINDOW_PALETTE = [
@@ -169,6 +173,12 @@ class MacroRecorderApp:
         self._playing: bool = False
         self._poll_cursor: int = 0   # events from current recording already shown
         self._clipboard: list[list[MacroEvent]] = []
+        # Undo/redo over whole-table snapshots.  Details-panel keystrokes on
+        # one row coalesce into a single step; recording suspends snapshots
+        # while rows stream in live.
+        self._undo = UndoStack(limit=_UNDO_DEPTH)
+        self._edit_session_iid: str | None = None
+        self._undo_suspended: bool = False
         self._playing_iid: str | None = None  # currently highlighted row during playback
         # id(event) -> row iid, built per playback so the player's active-event
         # reports map back to table rows by identity.
@@ -368,6 +378,8 @@ class MacroRecorderApp:
         self.table.bind("<Control-v>",        lambda _: self._paste_rows())
         self.table.bind("<Alt-Up>",           lambda _: self._move_rows(-1))
         self.table.bind("<Alt-Down>",         lambda _: self._move_rows(1))
+        self.root.bind_all("<Control-z>", lambda _: self._undo_action())
+        self.root.bind_all("<Control-y>", lambda _: self._redo_action())
         self.table.bind("<<TreeviewSelect>>", lambda _: self._on_selection_change())
         # Note: the overlay auto-hides when the application loses focus — that is
         # owned by OverlayRenderer itself, so it covers every kind of drawing.
@@ -525,6 +537,8 @@ class MacroRecorderApp:
             return
         self._recording = True
         self._poll_cursor = 0
+        self._push_undo()
+        self._undo_suspended = True
         self._recorder = Recorder(stop_key="Key.f6")
         self._record_btn.config(state=tk.DISABLED)
         self._stop_record_btn.config(state=tk.NORMAL)
@@ -549,6 +563,7 @@ class MacroRecorderApp:
         # Rebuild authoritatively from the final grouped data (replaces the
         # provisional rows shown live during polling).
         self._load_groups_to_table(groups)
+        self._undo_suspended = False
         self._poll_cursor = 0
 
     def _poll_recorder(self) -> None:
@@ -820,6 +835,7 @@ class MacroRecorderApp:
         preceded by a synthesized window_focus row carrying its title and rect,
         and its relative coordinates are converted back to absolute for display.
         """
+        self._push_undo()
         for iid in self.table.get_children():
             self.table.delete(iid)
         self._row_events.clear()
@@ -969,6 +985,7 @@ class MacroRecorderApp:
         if not self._selected_iid or self._selected_iid not in self._row_events:
             return
         event = self._row_events[self._selected_iid][0]
+        self._begin_edit_session()
         mode = self._detail_widgets["goto_mode"].get()
         if mode == self._GOTO_INDEX_MODE:
             if event.target_index is None:
@@ -1102,6 +1119,7 @@ class MacroRecorderApp:
 
     def _insert_row_group(self, group: list[MacroEvent]) -> None:
         """Insert one row after the current selection (or at the end) and select it."""
+        self._push_undo()
         sel = self.table.selection()
         index = self.table.index(sel[0]) + 1 if sel else tk.END
         first = group[0]
@@ -1117,6 +1135,7 @@ class MacroRecorderApp:
         sel = self.table.selection()
         if not sel:
             return
+        self._push_undo()
         focus = self.table.next(sel[-1]) or self.table.prev(sel[0])
         for iid in sel:
             self.table.delete(iid)
@@ -1142,6 +1161,7 @@ class MacroRecorderApp:
     def _paste_rows(self) -> None:
         if not self._clipboard:
             return
+        self._push_undo()
         sel = self.table.selection()
         insert_at = self.table.index(sel[-1]) + 1 if sel else len(self.table.get_children())
 
@@ -1173,6 +1193,7 @@ class MacroRecorderApp:
             return "break"
         if delta > 0 and self.table.index(sel[-1]) == len(children) - 1:
             return "break"
+        self._push_undo()
         # Move top-down when going up and bottom-up when going down so rows in a
         # block never leapfrog each other.
         for iid in (sel if delta < 0 else reversed(sel)):
@@ -1252,6 +1273,68 @@ class MacroRecorderApp:
         self._model.normalize_timestamps(list(self.table.get_children()),
                                          _MIN_ACTION_SPACING_S)
 
+    # ------------------------------------------------------------------ undo/redo
+
+    def _snapshot(self) -> list[tuple[list[MacroEvent], str]]:
+        """Deep copy of every row's events and Label cell, in table order."""
+        rows = []
+        for iid in self.table.get_children():
+            group = self._row_events.get(iid)
+            if not group:
+                continue
+            vals = self.table.item(iid, "values")
+            rows.append((copy.deepcopy(group), vals[3] if len(vals) > 3 else ""))
+        return rows
+
+    def _restore(self, rows: list[tuple[list[MacroEvent], str]]) -> None:
+        """Replace the table with a snapshot, keeping the selection by position."""
+        selected = [self.table.index(i) for i in self.table.selection()]
+        for iid in self.table.get_children():
+            self.table.delete(iid)
+        self._row_events.clear()
+        self._window_color_map.clear()
+        new_iids = []
+        for group, label in rows:
+            first = group[0]
+            iid = self.table.insert("", tk.END, values=(
+                "", _action_label(first.type), self._format_row_value(group), label))
+            self._row_events[iid] = group
+            new_iids.append(iid)
+        self._refresh_after_mutation()
+        self.set_action_count(len(new_iids))
+        keep = [new_iids[i] for i in selected if i < len(new_iids)]
+        self.table.selection_set(keep)
+        if keep:
+            self.table.see(keep[0])
+        self._on_selection_change()
+
+    def _push_undo(self) -> None:
+        """Record the current table as an undo step.  Call before mutating."""
+        if self._undo_suspended:
+            return
+        snapshot = self._snapshot()
+        if snapshot != self._undo.peek():
+            self._undo.push(snapshot)
+        self._edit_session_iid = None
+
+    def _begin_edit_session(self) -> None:
+        """Snapshot once per run of edits to the selected row's details."""
+        if self._edit_session_iid != self._selected_iid:
+            self._push_undo()
+            self._edit_session_iid = self._selected_iid
+
+    def _undo_action(self) -> str:
+        rows = self._undo.undo(self._snapshot())
+        if rows is not None:
+            self._restore(rows)
+        return "break"
+
+    def _redo_action(self) -> str:
+        rows = self._undo.redo(self._snapshot())
+        if rows is not None:
+            self._restore(rows)
+        return "break"
+
     # -------------------------------------------------------------- drag reorder
 
     def _on_drag_start(self, event: tk.Event) -> None:
@@ -1309,6 +1392,7 @@ class MacroRecorderApp:
         if insert_at is not None:
             new_order = remaining[:insert_at] + drag_ordered + remaining[insert_at:]
             if new_order != full:
+                self._push_undo()
                 for idx, iid in enumerate(new_order):
                     self.table.move(iid, "", idx)
                 self._refresh_after_mutation()
@@ -1349,6 +1433,8 @@ class MacroRecorderApp:
 
             def _commit(_=None) -> None:
                 vals = list(self.table.item(iid, "values"))
+                if entry.get() != vals[col_index]:
+                    self._push_undo()
                 vals[col_index] = entry.get()
                 self.table.item(iid, values=vals)
                 entry.destroy()
@@ -1384,6 +1470,7 @@ class MacroRecorderApp:
     # ---------------------------------------------------------- screen overlay
 
     def _on_selection_change(self) -> None:
+        self._edit_session_iid = None
         sel = self.table.selection()
         if len(sel) != 1:
             self._overlay.hide()
@@ -1756,6 +1843,7 @@ class MacroRecorderApp:
 
         group = self._row_events[self._selected_iid]
         first_event = group[0]
+        self._begin_edit_session()
 
         # Update label
         if "label" in self._detail_widgets:
