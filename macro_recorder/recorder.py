@@ -23,6 +23,55 @@ from macro_recorder.window_manager import get_window_manager
 
 log = logging.getLogger(__name__)
 
+# A drag whose moves span less than this is still given a short travel time so
+# playback does not fall back to the timed-move default.
+_MIN_DRAG_DURATION_S = 0.05
+
+
+def collapse_drags(events: list[MacroEvent]) -> list[MacroEvent]:
+    """Replace each recorded drag with press, one timed move, release.
+
+    A drag is a button press, one or more mouse moves with nothing else in
+    between, then the release of the same button somewhere else.  The moves
+    become a single ``mouse_move_timed`` from the press point to the release
+    point whose duration is the span of the recorded movement.  Everything
+    else, including a press and release at the same spot, passes through
+    unchanged.  Input is not mutated.
+    """
+    out: list[MacroEvent] = []
+    i, n = 0, len(events)
+    while i < n:
+        press = events[i]
+        if press.type == EventType.MOUSE_CLICK and press.pressed:
+            j = i + 1
+            while j < n and events[j].type == EventType.MOUSE_MOVE:
+                j += 1
+            release = events[j] if j < n else None
+            is_drag = (
+                j > i + 1
+                and release is not None
+                and release.type == EventType.MOUSE_CLICK
+                and not release.pressed
+                and release.button == press.button
+                and (release.x, release.y) != (press.x, press.y)
+            )
+            if is_drag:
+                first_move, last_move = events[i + 1], events[j - 1]
+                out.append(press)
+                out.append(MacroEvent(
+                    type=EventType.MOUSE_MOVE_TIMED,
+                    ts=first_move.ts,
+                    x=press.x, y=press.y,
+                    dx=release.x, dy=release.y,
+                    duration=max(last_move.ts - first_move.ts, _MIN_DRAG_DURATION_S),
+                ))
+                out.append(release)
+                i = j + 1
+                continue
+        out.append(press)
+        i += 1
+    return out
+
 
 class Recorder:
     """Records mouse, keyboard, and window-focus events system-wide.
@@ -122,7 +171,7 @@ class Recorder:
         mouse_listener.join()
         kb_listener.join()
 
-        return self._build_groups(list(self._events))
+        return self._build_groups(collapse_drags(list(self._events)))
 
     # ------------------------------------------------------------------
     # Window focus monitoring (Windows only)

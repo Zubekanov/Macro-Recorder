@@ -66,6 +66,10 @@ Variables live in a dict overlaid with read-only dynamic values (`rt_ms`, `op_nu
 
 Every table mutation calls `TableModel.normalize_timestamps` with the visual row order. Each `window_focus` row resets the clock to zero. Every other row is shifted to start at the running clock, keeping its internal spacing, and the clock advances by the row's numeric duration or 50 ms for instant actions. This is what keeps edited macros playing in table order.
 
+## Recording
+
+The recorder keeps a flat stream from pynput plus `window_focus` markers from the Win32 hook. When recording stops, `collapse_drags` turns every button-held movement into press, one `mouse_move_timed`, release. Then `_build_groups` splits the stream at focus markers and makes coordinates window-relative. Free movement stays as raw moves and is bundled into rows by the GUI.
+
 ## GUI notes
 
 - Rows are bundles: a click down/up pair, a run of moves, or a run of same-direction scrolls is one row. `bundling.py` decides.
