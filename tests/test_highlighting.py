@@ -9,9 +9,9 @@ for both linear and control-flow playback.
 import unittest
 
 from tests.playback_test_utils import start_player_io_patches, stop_player_io_patches
-from src.event_types import EventType
-from src.macro import MacroEvent, MacroGroup
-from src.player import GOTO_START, Player
+from macro_recorder.event_types import EventType
+from macro_recorder.macro import MacroEvent, MacroGroup
+from macro_recorder.player import GOTO_START, Player
 
 
 def setUpModule():

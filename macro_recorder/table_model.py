@@ -15,8 +15,8 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Optional
 
-from src.event_types import EventType
-from src.macro import MacroEvent, MacroGroup, WindowRect
+from macro_recorder.event_types import EventType
+from macro_recorder.macro import MacroEvent, MacroGroup, WindowRect
 
 # Minimum spacing handed to instant (zero-duration) actions so consecutive
 # rows never share a timestamp.

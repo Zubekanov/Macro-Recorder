@@ -5,9 +5,9 @@ import tempfile
 from pathlib import Path
 import time
 from dataclasses import replace
-from src.macro import MacroEvent, MacroGroup, WindowRect, load_macro, save_macro
-from src.player import Player
-from src.recorder import Recorder
+from macro_recorder.macro import MacroEvent, MacroGroup, WindowRect, load_macro, save_macro
+from macro_recorder.player import Player
+from macro_recorder.recorder import Recorder
 
 
 class TestRecordingWorkflow(unittest.TestCase):

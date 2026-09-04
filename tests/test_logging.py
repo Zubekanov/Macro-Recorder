@@ -2,10 +2,10 @@
 
 import unittest
 
-from src.event_types import EventType
-from src.macro import MacroEvent, MacroGroup
-from src.player import GOTO_END, Player
-from src.table_model import TableModel
+from macro_recorder.event_types import EventType
+from macro_recorder.macro import MacroEvent, MacroGroup
+from macro_recorder.player import GOTO_END, Player
+from macro_recorder.table_model import TableModel
 from tests.playback_test_utils import start_player_io_patches, stop_player_io_patches
 
 

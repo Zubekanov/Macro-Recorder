@@ -8,9 +8,9 @@ list    — print a formatted table of events from a macro file
 
 Usage
 -----
-    python -m src.main record [output.json] [--stop-key KEY]
-    python -m src.main play <file.json> [--speed FLOAT] [--repeat INT] [--stop-key KEY]
-    python -m src.main list <file.json>
+    macro-recorder-cli record [output.json] [--stop-key KEY]
+    macro-recorder-cli play <file.json> [--speed FLOAT] [--repeat INT] [--stop-key KEY]
+    macro-recorder-cli list <file.json>
 """
 
 from __future__ import annotations
@@ -19,10 +19,10 @@ import argparse
 import sys
 from datetime import datetime
 
-from src.event_types import EventType
-from src.macro import load_macro, save_macro, MacroEvent
-from src.recorder import Recorder
-from src.player import Player, WindowNotFoundError
+from macro_recorder.event_types import EventType
+from macro_recorder.macro import load_macro, save_macro, MacroEvent
+from macro_recorder.recorder import Recorder
+from macro_recorder.player import Player, WindowNotFoundError
 
 
 # ---------------------------------------------------------------------------
@@ -32,7 +32,7 @@ from src.player import Player, WindowNotFoundError
 def build_parser() -> argparse.ArgumentParser:
     """Build and return the top-level argument parser."""
     parser = argparse.ArgumentParser(
-        prog="python -m src.main",
+        prog="macro-recorder-cli",
         description="Macro Recorder — record and replay system-wide mouse and keyboard input.",
     )
     subs = parser.add_subparsers(dest="command", required=True)

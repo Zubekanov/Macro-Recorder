@@ -4,10 +4,10 @@ are mocked — no real screen, cv2, mss, or OCR engine is touched)."""
 import unittest
 from unittest import mock
 
-from src.event_types import EventType
-from src.macro import MacroEvent, MacroGroup
-from src.matching import MatchError, _similarity
-from src.player import MacroExecutionError, Player
+from macro_recorder.event_types import EventType
+from macro_recorder.macro import MacroEvent, MacroGroup
+from macro_recorder.matching import MatchError, _similarity
+from macro_recorder.player import MacroExecutionError, Player
 from tests.playback_test_utils import start_player_io_patches, stop_player_io_patches
 
 
@@ -42,7 +42,7 @@ def _play(events):
 
 class TestMatchImage(unittest.TestCase):
     def test_found_sets_flag_and_captures_coords(self):
-        with mock.patch("src.player.find_image", return_value=(640, 480, 0.97)) as fi:
+        with mock.patch("macro_recorder.player.find_image", return_value=(640, 480, 0.97)) as fi:
             player = _play([_img("found", capture_var="cx", capture_var_y="cy")])
         self.assertEqual(player._variables["found"], 1)
         self.assertEqual(player._variables["cx"], 640)
@@ -50,37 +50,37 @@ class TestMatchImage(unittest.TestCase):
         fi.assert_called_with((0, 0, 100, 100), "ref.png", 0.9)
 
     def test_not_found_times_out_sets_zero(self):
-        with mock.patch("src.player.find_image", return_value=None):
+        with mock.patch("macro_recorder.player.find_image", return_value=None):
             player = _play([_img("found", duration=0.0, capture_var="cx")])
         self.assertEqual(player._variables["found"], 0)
         self.assertNotIn("cx", player._variables)   # nothing captured on timeout
 
     def test_monitor_region_used_when_set(self):
-        with mock.patch("src.player.monitor_region", return_value=(0, 0, 1920, 1080)) as mr, \
-             mock.patch("src.player.find_image", return_value=(10, 20, 0.99)) as fi:
+        with mock.patch("macro_recorder.player.monitor_region", return_value=(0, 0, 1920, 1080)) as mr, \
+             mock.patch("macro_recorder.player.find_image", return_value=(10, 20, 0.99)) as fi:
             _play([_img("found", monitor=1)])
         mr.assert_called_once_with(1)
         fi.assert_called_with((0, 0, 1920, 1080), "ref.png", 0.9)
 
     def test_match_error_aborts(self):
-        with mock.patch("src.player.find_image", side_effect=MatchError("no cv2")):
+        with mock.patch("macro_recorder.player.find_image", side_effect=MatchError("no cv2")):
             with self.assertRaises(MacroExecutionError):
                 _play([_img("found")])
 
     def test_invalid_variable_name_aborts(self):
-        with mock.patch("src.player.find_image", return_value=(1, 2, 0.99)):
+        with mock.patch("macro_recorder.player.find_image", return_value=(1, 2, 0.99)):
             with self.assertRaises(MacroExecutionError):
                 _play([_img("1bad")])
 
     def test_empty_region_aborts(self):
-        with mock.patch("src.player.find_image", return_value=None):
+        with mock.patch("macro_recorder.player.find_image", return_value=None):
             with self.assertRaises(MacroExecutionError):
                 _play([_img("found", x=50, y=50, dx=50, dy=50)])
 
 
 class TestMatchText(unittest.TestCase):
     def test_found_sets_flag_and_captures_text(self):
-        with mock.patch("src.player.match_text",
+        with mock.patch("macro_recorder.player.match_text",
                         return_value=("Hello World", 0.95, True)) as mt:
             player = _play([_txt("found", expr="Hello World", capture_var="seen")])
         self.assertEqual(player._variables["found"], 1)
@@ -88,7 +88,7 @@ class TestMatchText(unittest.TestCase):
         mt.assert_called_with((0, 0, 100, 100), "Hello World", 0.8)
 
     def test_not_matched_times_out_sets_zero_but_captures(self):
-        with mock.patch("src.player.match_text",
+        with mock.patch("macro_recorder.player.match_text",
                         return_value=("garbled", 0.1, False)):
             player = _play([_txt("found", capture_var="seen", duration=0.0)])
         self.assertEqual(player._variables["found"], 0)
@@ -99,14 +99,14 @@ class TestMatchText(unittest.TestCase):
             MacroEvent(type=EventType.VAR_SET, ts=0.0, var_name="who", expr='"Sam"'),
             _txt("found", expr="Hi {who}", ts=0.1),
         ]
-        with mock.patch("src.player.match_text",
+        with mock.patch("macro_recorder.player.match_text",
                         return_value=("Hi Sam", 1.0, True)) as mt:
             Player(repeat=1).play([MacroGroup(window=None, recorded_rect=None, events=events)])
         mt.assert_called_with((0, 0, 100, 100), "Hi Sam", 0.8)
 
     def test_ocr_error_aborts(self):
-        from src.ocr import OcrError
-        with mock.patch("src.player.match_text", side_effect=OcrError("no engine")):
+        from macro_recorder.ocr import OcrError
+        with mock.patch("macro_recorder.player.match_text", side_effect=OcrError("no engine")):
             with self.assertRaises(MacroExecutionError):
                 _play([_txt("found")])
 
@@ -114,13 +114,13 @@ class TestMatchText(unittest.TestCase):
 class TestMatchPipeline(unittest.TestCase):
     def test_match_then_conditional_goto(self):
         """found-flag drives a Conditional Go To: skip a step when not found."""
-        from src.player import GOTO_END
+        from macro_recorder.player import GOTO_END
         events = [
             _txt("found", ts=0.0),
             MacroEvent(type=EventType.GOTO_IF, ts=0.1, expr="found == 0", target=GOTO_END),
             MacroEvent(type=EventType.VAR_SET, ts=0.2, var_name="ran", expr="1"),
         ]
-        with mock.patch("src.player.match_text", return_value=("x", 0.0, False)):
+        with mock.patch("macro_recorder.player.match_text", return_value=("x", 0.0, False)):
             player = Player(repeat=1)
             player.play([MacroGroup(window=None, recorded_rect=None, events=events)])
         self.assertEqual(player._variables["found"], 0)

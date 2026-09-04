@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import tkinter as tk
 
-from src.macro import MacroEvent
+from macro_recorder.macro import MacroEvent
 
 # Overlay marker styling.
 _OVERLAY_COLOR = "#e74c3c"        # primary red: lines, end markers, click cross

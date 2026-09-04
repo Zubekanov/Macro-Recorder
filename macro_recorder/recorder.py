@@ -10,8 +10,8 @@ from typing import Optional
 
 from pynput import keyboard, mouse
 
-from src.event_types import EventType
-from src.macro import (
+from macro_recorder.event_types import EventType
+from macro_recorder.macro import (
     MacroEvent,
     MacroGroup,
     WindowRect,
@@ -19,7 +19,7 @@ from src.macro import (
     serialize_button,
     serialize_key,
 )
-from src.window_manager import get_window_manager
+from macro_recorder.window_manager import get_window_manager
 
 log = logging.getLogger(__name__)
 

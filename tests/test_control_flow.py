@@ -2,9 +2,9 @@
 
 import unittest
 
-from src.event_types import EventType
-from src.macro import MacroEvent, MacroGroup
-from src.player import GOTO_END, GOTO_START, Player
+from macro_recorder.event_types import EventType
+from macro_recorder.macro import MacroEvent, MacroGroup
+from macro_recorder.player import GOTO_END, GOTO_START, Player
 from tests.playback_test_utils import start_player_io_patches, stop_player_io_patches
 
 
@@ -98,7 +98,7 @@ class TestControlFlow(unittest.TestCase):
         # When events carry table row markers (set by TableModel.rows_to_groups),
         # an instruction number resolves to that row's first event even though an
         # earlier row bundles several events into one instruction.
-        from src.table_model import TableModel
+        from macro_recorder.table_model import TableModel
         model = TableModel()
         model.row_events = {
             "r1": [_var("x", "0", 0.0)],                                   # #1
@@ -147,12 +147,12 @@ class TestRuntimeResolution(unittest.TestCase):
         self.assertEqual(Player()._resolve(None, default=7), 7)
 
     def test_resolve_bad_expression_aborts(self):
-        from src.player import MacroExecutionError
+        from macro_recorder.player import MacroExecutionError
         with self.assertRaises(MacroExecutionError):
             Player()._resolve("1 +")
 
     def test_resolve_uninitialised_variable_aborts(self):
-        from src.player import MacroExecutionError
+        from macro_recorder.player import MacroExecutionError
         with self.assertRaises(MacroExecutionError):
             Player()._resolve("missing + 1")
 

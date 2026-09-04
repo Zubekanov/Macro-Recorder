@@ -110,7 +110,7 @@ def match_text(region, expected: str, tolerance: float) -> tuple:
     matched is ``ratio >= tolerance``.  Raises MatchError on capture failure
     (OCR errors propagate as OcrError).
     """
-    from src.ocr import ocr_image
+    from macro_recorder.ocr import ocr_image
     text = ocr_image(_grab(region))
     ratio = _similarity(text, expected)
     return (text, ratio, ratio >= tolerance)

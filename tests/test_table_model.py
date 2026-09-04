@@ -2,9 +2,9 @@
 
 import unittest
 
-from src.event_types import EventType
-from src.macro import MacroEvent, MacroGroup, WindowRect
-from src.table_model import TableModel
+from macro_recorder.event_types import EventType
+from macro_recorder.macro import MacroEvent, MacroGroup, WindowRect
+from macro_recorder.table_model import TableModel
 
 
 class TestNormalize(unittest.TestCase):

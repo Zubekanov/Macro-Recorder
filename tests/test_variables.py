@@ -2,9 +2,9 @@
 
 import unittest
 
-from src.event_types import EventType
-from src.macro import MacroEvent, MacroGroup
-from src.player import Player
+from macro_recorder.event_types import EventType
+from macro_recorder.macro import MacroEvent, MacroGroup
+from macro_recorder.player import Player
 from tests.playback_test_utils import start_player_io_patches, stop_player_io_patches
 
 
@@ -49,12 +49,12 @@ class TestVariablePlayback(unittest.TestCase):
         self.assertEqual(variables["x"], 1)
 
     def test_bad_expression_aborts_playback(self):
-        from src.player import MacroExecutionError
+        from macro_recorder.player import MacroExecutionError
         with self.assertRaises(MacroExecutionError):
             _play([_var("x", "1 +", 0.0)])
 
     def test_uninitialised_variable_aborts_playback(self):
-        from src.player import MacroExecutionError
+        from macro_recorder.player import MacroExecutionError
         with self.assertRaises(MacroExecutionError):
             _play([_var("x", "y + 1", 0.0)])   # y never initialised
 
@@ -75,7 +75,7 @@ class TestStringsAndTyping(unittest.TestCase):
         player._kb_ctrl.type.assert_called_with("hi Sam!")
 
     def test_type_text_undefined_var_aborts(self):
-        from src.player import MacroExecutionError
+        from macro_recorder.player import MacroExecutionError
         with self.assertRaises(MacroExecutionError):
             _play([MacroEvent(type=EventType.TYPE_TEXT, ts=0.0, expr="{missing}")])
 

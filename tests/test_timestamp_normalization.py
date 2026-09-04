@@ -4,8 +4,8 @@ These exercise the real TableModel.normalize_timestamps (no duplicated copy).
 """
 
 import unittest
-from src.macro import MacroEvent
-from src.table_model import TableModel
+from macro_recorder.macro import MacroEvent
+from macro_recorder.table_model import TableModel
 
 
 class TestTimestampNormalization(unittest.TestCase):

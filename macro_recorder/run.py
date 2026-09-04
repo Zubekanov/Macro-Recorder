@@ -1,25 +1,19 @@
 import collections
 import copy
-import sys
 import threading
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-# Allow running as `python src/run.py` from the project root
-_root = Path(__file__).resolve().parent.parent
-if str(_root) not in sys.path:
-    sys.path.insert(0, str(_root))
-
-import pyautogui  # noqa: E402
-from src.bundling import bundle_events
-from src.event_types import EventType
-from src.expressions import ExpressionError, evaluate
-from src.macro import MacroEvent, MacroGroup, load_macro, save_macro
-from src.overlay_renderer import OverlayRenderer
-from src.table_model import TableModel
-from src.recorder import Recorder
-from src.player import (
+import pyautogui
+from macro_recorder.bundling import bundle_events
+from macro_recorder.event_types import EventType
+from macro_recorder.expressions import ExpressionError, evaluate
+from macro_recorder.macro import MacroEvent, MacroGroup, load_macro, save_macro
+from macro_recorder.overlay_renderer import OverlayRenderer
+from macro_recorder.table_model import TableModel
+from macro_recorder.recorder import Recorder
+from macro_recorder.player import (
     DYNAMIC_VALUES,
     GOTO_END,
     GOTO_START,

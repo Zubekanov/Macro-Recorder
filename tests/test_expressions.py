@@ -2,7 +2,7 @@
 
 import unittest
 
-from src.expressions import (
+from macro_recorder.expressions import (
     ExpressionError,
     evaluate,
     evaluate_condition,

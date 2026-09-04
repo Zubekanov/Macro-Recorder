@@ -25,12 +25,12 @@ _patchers = []
 
 
 def start_player_io_patches() -> None:
-    """Replace pynput controllers/listener in src.player with mocks."""
+    """Replace pynput controllers/listener in macro_recorder.player with mocks."""
     global _patchers
     _patchers = [
-        mock.patch("src.player.mouse.Controller"),
-        mock.patch("src.player.keyboard.Controller"),
-        mock.patch("src.player.keyboard.Listener"),
+        mock.patch("macro_recorder.player.mouse.Controller"),
+        mock.patch("macro_recorder.player.keyboard.Controller"),
+        mock.patch("macro_recorder.player.keyboard.Listener"),
     ]
     for p in _patchers:
         p.start()

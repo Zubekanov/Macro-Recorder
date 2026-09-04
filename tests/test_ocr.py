@@ -3,9 +3,9 @@
 import unittest
 from unittest import mock
 
-from src.event_types import EventType
-from src.macro import MacroEvent, MacroGroup
-from src.player import MacroExecutionError, Player
+from macro_recorder.event_types import EventType
+from macro_recorder.macro import MacroEvent, MacroGroup
+from macro_recorder.player import MacroExecutionError, Player
 from tests.playback_test_utils import start_player_io_patches, stop_player_io_patches
 
 
@@ -29,13 +29,13 @@ def _play(events):
 
 class TestOcrAction(unittest.TestCase):
     def test_assigns_ocr_text_to_variable(self):
-        with mock.patch("src.player.read_region", return_value="captured text") as rr:
+        with mock.patch("macro_recorder.player.read_region", return_value="captured text") as rr:
             player = _play([_ocr("caption", 10, 20, 110, 70)])
         self.assertEqual(player._variables["caption"], "captured text")
         rr.assert_called_once_with(10, 20, 100, 50)   # normalized left, top, width, height
 
     def test_region_normalized_regardless_of_corner_order(self):
-        with mock.patch("src.player.read_region", return_value="x") as rr:
+        with mock.patch("macro_recorder.player.read_region", return_value="x") as rr:
             _play([_ocr("v", 110, 70, 10, 20)])        # bottom-right given first
         rr.assert_called_once_with(10, 20, 100, 50)
 
@@ -46,23 +46,23 @@ class TestOcrAction(unittest.TestCase):
         ]
         player = Player(repeat=1)
         player._kb_ctrl.type.reset_mock()   # controller mock is shared module-wide
-        with mock.patch("src.player.read_region", return_value="Sam"):
+        with mock.patch("macro_recorder.player.read_region", return_value="Sam"):
             player.play([MacroGroup(window=None, recorded_rect=None, events=events)])
         player._kb_ctrl.type.assert_called_with("Hello Sam")
 
     def test_invalid_variable_name_aborts(self):
-        with mock.patch("src.player.read_region", return_value="x"):
+        with mock.patch("macro_recorder.player.read_region", return_value="x"):
             with self.assertRaises(MacroExecutionError):
                 _play([_ocr("1bad", 0, 0, 10, 10)])
 
     def test_empty_region_aborts(self):
-        with mock.patch("src.player.read_region", return_value="x"):
+        with mock.patch("macro_recorder.player.read_region", return_value="x"):
             with self.assertRaises(MacroExecutionError):
                 _play([_ocr("v", 50, 50, 50, 50)])     # zero-size region
 
     def test_ocr_failure_aborts(self):
-        from src.ocr import OcrError
-        with mock.patch("src.player.read_region", side_effect=OcrError("no tesseract")):
+        from macro_recorder.ocr import OcrError
+        with mock.patch("macro_recorder.player.read_region", side_effect=OcrError("no tesseract")):
             with self.assertRaises(MacroExecutionError):
                 _play([_ocr("v", 0, 0, 10, 10)])
 

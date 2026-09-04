@@ -2,9 +2,9 @@
 
 import unittest
 
-from src.event_types import EventType
-from src.macro import MacroEvent, MacroGroup
-from src.player import DYNAMIC_VALUES, Player
+from macro_recorder.event_types import EventType
+from macro_recorder.macro import MacroEvent, MacroGroup
+from macro_recorder.player import DYNAMIC_VALUES, Player
 from tests.playback_test_utils import start_player_io_patches, stop_player_io_patches
 
 
@@ -52,7 +52,7 @@ class TestDynamicValues(unittest.TestCase):
 
     def test_dynamic_value_usable_in_condition(self):
         # op_num drives a conditional jump just like a user variable.
-        from src.player import GOTO_END
+        from macro_recorder.player import GOTO_END
         variables = _play([
             _var("hit", "0", 0.0),                                   # #1
             MacroEvent(type=EventType.GOTO_IF, ts=0.1,
@@ -63,13 +63,13 @@ class TestDynamicValues(unittest.TestCase):
 
     def test_assigning_to_dynamic_name_aborts(self):
         # Dynamic names are reserved — assigning to one halts playback.
-        from src.player import MacroExecutionError
+        from macro_recorder.player import MacroExecutionError
         with self.assertRaises(MacroExecutionError):
             _play([_var("iteration", "42", 0.0)])
 
     def test_undefined_name_still_raises(self):
         # A non-dynamic, unset variable remains an error (strict model intact).
-        from src.player import MacroExecutionError
+        from macro_recorder.player import MacroExecutionError
         with self.assertRaises(MacroExecutionError):
             _play([_var("x", "not_a_real_value", 0.0)])
 

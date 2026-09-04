@@ -10,8 +10,8 @@ from typing import Optional
 
 from pynput import keyboard, mouse
 
-from src.event_types import EventType
-from src.expressions import (
+from macro_recorder.event_types import EventType
+from macro_recorder.expressions import (
     ExpressionError,
     evaluate,
     evaluate_condition,
@@ -19,10 +19,10 @@ from src.expressions import (
     render_template,
     resolve_number,
 )
-from src.macro import MacroEvent, MacroGroup, deserialize_button, deserialize_key
-from src.matching import MatchError, find_image, match_text, monitor_region
-from src.ocr import OcrError, read_region
-from src.window_manager import get_window_manager
+from macro_recorder.macro import MacroEvent, MacroGroup, deserialize_button, deserialize_key
+from macro_recorder.matching import MatchError, find_image, match_text, monitor_region
+from macro_recorder.ocr import OcrError, read_region
+from macro_recorder.window_manager import get_window_manager
 
 log = logging.getLogger(__name__)
 

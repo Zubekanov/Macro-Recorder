@@ -2,8 +2,8 @@
 
 import unittest
 from dataclasses import replace
-from src.macro import MacroEvent, MacroGroup, WindowRect, load_macro, save_macro
-from src.player import Player
+from macro_recorder.macro import MacroEvent, MacroGroup, WindowRect, load_macro, save_macro
+from macro_recorder.player import Player
 from pathlib import Path
 import tempfile
 import time
@@ -140,7 +140,7 @@ class TestEventSerialization(unittest.TestCase):
 
     def test_from_dict_accepts_known_type(self):
         """from_dict accepts every canonical event type."""
-        from src.event_types import EVENT_TYPE_VALUES
+        from macro_recorder.event_types import EVENT_TYPE_VALUES
         for t in EVENT_TYPE_VALUES:
             ev = MacroEvent.from_dict({"type": t, "ts": 0.0})
             self.assertEqual(ev.type, t)

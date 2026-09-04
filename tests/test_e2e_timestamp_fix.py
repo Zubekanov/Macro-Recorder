@@ -12,8 +12,8 @@ import tempfile
 from pathlib import Path
 from dataclasses import replace
 
-from src.macro import MacroEvent, MacroGroup, save_macro, load_macro
-from src.player import Player
+from macro_recorder.macro import MacroEvent, MacroGroup, save_macro, load_macro
+from macro_recorder.player import Player
 from tests.playback_test_utils import start_player_io_patches, stop_player_io_patches
 
 

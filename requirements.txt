@@ -1,7 +1,0 @@
-pyautogui>=0.9.54
-pynput>=1.7.6
-pywin32>=305
-Pillow>=9
-winsdk>=1.0.0b10  # Windows 10/11 native OCR (Windows.Media.Ocr); no external binary
-mss>=9            # robust multi-monitor screen capture (for OCR/match regions)
-opencv-python>=4.8  # template matching for the image-match action

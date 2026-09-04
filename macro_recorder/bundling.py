@@ -14,8 +14,8 @@ can be unit-tested without tkinter.
 
 from __future__ import annotations
 
-from src.event_types import EventType
-from src.macro import MacroEvent
+from macro_recorder.event_types import EventType
+from macro_recorder.macro import MacroEvent
 
 
 def bundle_events(

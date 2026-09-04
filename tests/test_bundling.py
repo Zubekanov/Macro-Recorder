@@ -2,9 +2,9 @@
 
 import unittest
 
-from src.bundling import bundle_events
-from src.event_types import EventType
-from src.macro import MacroEvent
+from macro_recorder.bundling import bundle_events
+from macro_recorder.event_types import EventType
+from macro_recorder.macro import MacroEvent
 
 MOVE_GAP = 0.5
 CLICK_GAP = 0.25

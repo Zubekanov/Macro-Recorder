@@ -10,7 +10,7 @@ from typing import Any, Optional
 from pynput.keyboard import Key, KeyCode
 from pynput.mouse import Button
 
-from src.event_types import EVENT_TYPE_VALUES
+from macro_recorder.event_types import EVENT_TYPE_VALUES
 
 
 # ---------------------------------------------------------------------------
