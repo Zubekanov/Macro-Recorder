@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import random
+import subprocess
 import threading
 import time
 from typing import Optional
@@ -126,12 +127,14 @@ class Player:
     Window context
     --------------
     Each group may carry a window title and recorded rectangle.  Before a
-    windowed group is replayed, the target window is located, moved/resized to
-    its recorded rectangle, and brought to the foreground; the group's relative
-    mouse coordinates are then converted back to absolute screen coordinates.
-    If the window cannot be found within `window_timeout` seconds, the group is
-    skipped (on_missing_window="skip") or playback halts with a descriptive
-    error (on_missing_window="halt").
+    windowed group is replayed, the target window is located (by substring or
+    regex, per the group's match_mode), moved/resized to its recorded
+    rectangle, and brought to the foreground; the group's relative mouse
+    coordinates are then converted back to absolute screen coordinates.
+    If the window cannot be found within `window_timeout` seconds and the group
+    has a launch command, it is run once and the wait repeats.  If the window is
+    still missing, the group is skipped (on_missing_window="skip") or playback
+    halts with a descriptive error (on_missing_window="halt").
 
     Timing
     ------
@@ -210,6 +213,7 @@ class Player:
         self._held_keys: set = set()
         self._held_buttons: set = set()
         self._dispatching: bool = False
+        self._launched: set[int] = set()   # id(group) already launched this run
 
         # Live playback counters backing the dynamic values (reset in play()).
         self._play_start_perf: float = time.perf_counter()
@@ -271,6 +275,7 @@ class Player:
         self._stop_event.clear()
         self._held_keys.clear()
         self._held_buttons.clear()
+        self._launched.clear()
         self._variables.clear()
         self._play_start_perf = time.perf_counter()
         self._current_instr = 0
@@ -357,23 +362,43 @@ class Player:
     def _prepare_window(self, group: MacroGroup) -> bool:
         """Locate, reposition, and focus the group's target window.
 
-        Returns True once the window is ready, or False if the timeout elapses
-        or the stop key is pressed.
+        Waits up to window_timeout.  If that fails and the group has a launch
+        command, runs it once per play() and waits again.  Returns True once
+        the window is ready, or False if it never appears or the stop key is
+        pressed.
         """
+        if self._wait_for_window(group):
+            return True
+        if self._stop_event.is_set() or not group.launch or id(group) in self._launched:
+            return False
+        self._launched.add(id(group))
+        self._emit("Window %r not found, launching: %s" % (group.window, group.launch))
+        try:
+            subprocess.Popen(group.launch, shell=True)
+        except OSError as e:
+            log.warning("Could not launch %r: %s", group.launch, e)
+            return False
+        return self._wait_for_window(group)
+
+    def _wait_for_window(self, group: MacroGroup) -> bool:
+        """Poll for the group's window until found, timed out, or stopped."""
         deadline = time.monotonic() + self._window_timeout
-        while time.monotonic() < deadline:
+        while True:
             if self._stop_event.is_set():
                 return False
-            info = self._wm.find_window(group.window)
+            try:
+                info = self._wm.find_window(group.window, group.match_mode)
+            except ValueError as e:
+                raise MacroExecutionError(str(e)) from e
             if info:
                 if group.recorded_rect:
                     r = group.recorded_rect
-                    self._wm.move_resize(group.window, r.left, r.top, r.width, r.height)
-                self._wm.set_foreground(group.window)
+                    self._wm.move_resize(info, r.left, r.top, r.width, r.height)
+                self._wm.set_foreground(info)
                 return True
-            if self._stop_event.wait(timeout=0.25):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or self._stop_event.wait(timeout=min(0.25, remaining)):
                 return False
-        return False
 
     def _play_group(self, group: MacroGroup) -> None:
         """Play a single group's events, timed relative to the group's start.
@@ -589,6 +614,12 @@ class Player:
         if self._on_log is None or not self._is_row_start(event):
             return
         self._on_log("[%s] %s" % (self._current_instr, detail))
+
+    def _emit(self, message: str) -> None:
+        """Emit a log line not tied to an instruction."""
+        log.info(message)
+        if self._on_log is not None:
+            self._on_log(message)
 
     def _goto_target_desc(self, event: MacroEvent) -> str:
         if event.target_index is not None:

@@ -13,6 +13,7 @@ from macro_recorder.macro import MacroEvent, MacroGroup, load_macro, save_macro
 from macro_recorder.overlay_renderer import OverlayRenderer
 from macro_recorder.table_model import TableModel
 from macro_recorder.recorder import Recorder
+from macro_recorder.window_manager import MATCH_MODES, MATCH_SUBSTRING
 from macro_recorder.player import (
     DYNAMIC_VALUES,
     GOTO_END,
@@ -1440,8 +1441,11 @@ class MacroRecorderApp:
         self._detail_row += 1
         return entry
 
-    def _make_file_field(self, label_text: str, initial_value, widget_key: str) -> tk.Entry:
+    def _make_file_field(self, label_text: str, initial_value, widget_key: str,
+                         title: str = "Choose reference image",
+                         filetypes: list | None = None) -> tk.Entry:
         """Create Label + Entry + Browse button for choosing a file path."""
+        filetypes = filetypes or [("Images", "*.png *.jpg *.jpeg *.bmp *.gif"), ("All files", "*.*")]
         tk.Label(self._details_scroll_frame, text=label_text, font=("Arial", 9)).grid(
             row=self._detail_row, column=0, sticky="w", pady=3)
         frame = tk.Frame(self._details_scroll_frame)
@@ -1453,10 +1457,7 @@ class MacroRecorderApp:
         self._detail_widgets[widget_key] = entry
 
         def browse() -> None:
-            path = filedialog.askopenfilename(
-                title="Choose reference image",
-                filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp *.gif"), ("All files", "*.*")],
-            )
+            path = filedialog.askopenfilename(title=title, filetypes=filetypes)
             if path:
                 entry.delete(0, tk.END)
                 entry.insert(0, path)
@@ -1638,7 +1639,15 @@ class MacroRecorderApp:
         # Build detail fields based on event type
         self._detail_row = 0
 
-        if first_event.type == EventType.MOUSE_MOVE and len(group) == 1:
+        if first_event.type == EventType.WINDOW_FOCUS:
+            self._make_entry_field("Window title:", first_event.window or "", "window")
+            self._make_combobox_field("Match:", list(MATCH_MODES), "match_mode",
+                                      first_event.match_mode or MATCH_SUBSTRING)
+            self._make_file_field("Launch if missing:", first_event.launch or "", "launch",
+                                  title="Choose program to launch",
+                                  filetypes=[("Programs", "*.exe *.bat *.cmd *.lnk"), ("All files", "*.*")])
+
+        elif first_event.type == EventType.MOUSE_MOVE and len(group) == 1:
             self._make_coordinate_pair("Target:", "x", "y", first_event.x or 0, first_event.y or 0, targeting_key="x,y")
 
         elif first_event.type == EventType.MOUSE_MOVE_TIMED:
@@ -1755,7 +1764,15 @@ class MacroRecorderApp:
 
         # Update event-specific fields
         try:
-            if first_event.type == EventType.MOUSE_MOVE and len(group) == 1:
+            if first_event.type == EventType.WINDOW_FOCUS:
+                if "window" in self._detail_widgets:
+                    first_event.window = self._detail_widgets["window"].get()
+                if "match_mode" in self._detail_widgets:
+                    first_event.match_mode = self._detail_widgets["match_mode"].get()
+                if "launch" in self._detail_widgets:
+                    first_event.launch = self._detail_widgets["launch"].get().strip() or None
+
+            elif first_event.type == EventType.MOUSE_MOVE and len(group) == 1:
                 if "x" in self._detail_widgets:
                     first_event.x = self._parse_field(self._detail_widgets["x"].get())
                 if "y" in self._detail_widgets:

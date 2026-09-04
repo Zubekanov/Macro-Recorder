@@ -11,6 +11,7 @@ from pynput.keyboard import Key, KeyCode
 from pynput.mouse import Button
 
 from macro_recorder.event_types import EVENT_TYPE_VALUES
+from macro_recorder.window_manager import MATCH_SUBSTRING
 
 
 # ---------------------------------------------------------------------------
@@ -58,6 +59,8 @@ class MacroEvent:
     monitor: Optional[int] = None      # 1-based monitor index; region source for match/ocr
     capture_var: Optional[str] = None  # variable for the captured value (text / match x)
     capture_var_y: Optional[str] = None  # variable for the match centre y (match_image)
+    match_mode: Optional[str] = None   # window_focus rows: how the title is matched
+    launch: Optional[str] = None       # window_focus rows: command run if window missing
 
     # Transient: the 1-based instruction (row) number this event begins, set when
     # building playback groups so the control-flow engine can resolve goto-by-
@@ -70,7 +73,7 @@ class MacroEvent:
         for name in ("x", "y", "button", "pressed", "dx", "dy", "key", "label",
                      "duration", "window", "rect", "var_name", "expr", "target",
                      "target_index", "char_delay", "image_path", "tolerance",
-                     "monitor", "capture_var", "capture_var_y"):
+                     "monitor", "capture_var", "capture_var_y", "match_mode", "launch"):
             value = getattr(self, name)
             if value is not None:
                 d[name] = value
@@ -109,6 +112,8 @@ class MacroEvent:
             monitor=d.get("monitor"),
             capture_var=d.get("capture_var"),
             capture_var_y=d.get("capture_var_y"),
+            match_mode=d.get("match_mode"),
+            launch=d.get("launch"),
         )
 
 
@@ -170,17 +175,28 @@ class MacroGroup:
                    group.  Mouse x/y in `events` are stored RELATIVE to
                    recorded_rect.left/top when window is set; absolute otherwise.
     events:        The events belonging to this group, in chronological order.
+    match_mode:    How `window` is matched against open windows at playback:
+                   "substring" (case-insensitive containment) or "regex".
+    launch:        Optional command run once if the window is not found within
+                   the timeout; the player then waits for the window again.
     """
     window: Optional[str]
     recorded_rect: Optional[WindowRect]
     events: list[MacroEvent]
+    match_mode: str = MATCH_SUBSTRING
+    launch: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "window": self.window,
             "recorded_rect": self.recorded_rect.to_dict() if self.recorded_rect else None,
             "events": [e.to_dict() for e in self.events],
         }
+        if self.match_mode != MATCH_SUBSTRING:
+            d["match_mode"] = self.match_mode
+        if self.launch:
+            d["launch"] = self.launch
+        return d
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "MacroGroup":
@@ -189,6 +205,8 @@ class MacroGroup:
             window=d.get("window"),
             recorded_rect=WindowRect.from_dict(rect_d) if rect_d else None,
             events=[MacroEvent.from_dict(e) for e in d.get("events", [])],
+            match_mode=d.get("match_mode") or MATCH_SUBSTRING,
+            launch=d.get("launch") or None,
         )
 
 

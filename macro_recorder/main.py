@@ -23,6 +23,7 @@ from macro_recorder.event_types import EventType
 from macro_recorder.macro import load_macro, save_macro, MacroEvent
 from macro_recorder.recorder import Recorder
 from macro_recorder.player import Player, WindowNotFoundError
+from macro_recorder.window_manager import MATCH_SUBSTRING
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +148,10 @@ def cmd_list(args: argparse.Namespace) -> None:
         if group.recorded_rect:
             r = group.recorded_rect
             rect = "  [%d,%d %dx%d]" % (r.left, r.top, r.width, r.height)
+        if group.match_mode != MATCH_SUBSTRING:
+            rect += "  match=%s" % group.match_mode
+        if group.launch:
+            rect += "  launch=%s" % group.launch
         print("\n=== Window: %s%s ===" % (scope, rect))
         print(header)
         print("-" * len(header))

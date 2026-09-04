@@ -17,6 +17,7 @@ from typing import Optional
 
 from macro_recorder.event_types import EventType
 from macro_recorder.macro import MacroEvent, MacroGroup, WindowRect, offset_event
+from macro_recorder.window_manager import MATCH_SUBSTRING
 
 # Minimum spacing handed to instant (zero-duration) actions so consecutive
 # rows never share a timestamp.
@@ -100,7 +101,8 @@ class TableModel:
                     r = g.recorded_rect
                     rect_list = [r.left, r.top, r.width, r.height]
                 flat.append(MacroEvent(type=EventType.WINDOW_FOCUS, ts=ts,
-                                       window=g.window, rect=rect_list))
+                                       window=g.window, rect=rect_list,
+                                       match_mode=g.match_mode, launch=g.launch))
             for ev in g.events:
                 ev_adjusted = replace(ev, ts=ev.ts + time_offset)
                 if g.window and g.recorded_rect:
@@ -140,6 +142,8 @@ class TableModel:
         current_window: Optional[str] = None
         current_rect: Optional[WindowRect] = None
         current_events: list[MacroEvent] = []
+        current_mode: str = MATCH_SUBSTRING
+        current_launch: Optional[str] = None
         instr_no = 0
 
         def _flush() -> None:
@@ -148,6 +152,8 @@ class TableModel:
                     window=current_window,
                     recorded_rect=current_rect,
                     events=current_events,
+                    match_mode=current_mode,
+                    launch=current_launch,
                 ))
 
         for iid in order:
@@ -162,6 +168,8 @@ class TableModel:
                 current_window = first.window
                 current_rect = WindowRect(*first.rect) if first.rect else None
                 current_events = []
+                current_mode = first.match_mode or MATCH_SUBSTRING
+                current_launch = first.launch or None
                 continue
 
             # Sync the edited label and instruction number onto the first event
