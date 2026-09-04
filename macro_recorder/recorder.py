@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from dataclasses import replace
 from typing import Optional
 
 from pynput import keyboard, mouse
@@ -16,6 +15,7 @@ from macro_recorder.macro import (
     MacroGroup,
     WindowRect,
     deserialize_key,
+    offset_event,
     serialize_button,
     serialize_key,
 )
@@ -268,9 +268,8 @@ class Recorder:
                 current_rect = WindowRect(*ev.rect) if ev.rect else None
                 current_events = []
             else:
-                if current_window and current_rect and ev.x is not None and ev.y is not None:
-                    ev = replace(ev, x=ev.x - current_rect.left,
-                                 y=ev.y - current_rect.top)
+                if current_window and current_rect:
+                    ev = offset_event(ev, -current_rect.left, -current_rect.top)
                 current_events.append(ev)
 
         _flush()

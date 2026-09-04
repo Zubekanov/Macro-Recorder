@@ -16,7 +16,7 @@ from dataclasses import replace
 from typing import Optional
 
 from macro_recorder.event_types import EventType
-from macro_recorder.macro import MacroEvent, MacroGroup, WindowRect
+from macro_recorder.macro import MacroEvent, MacroGroup, WindowRect, offset_event
 
 # Minimum spacing handed to instant (zero-duration) actions so consecutive
 # rows never share a timestamp.
@@ -103,9 +103,8 @@ class TableModel:
                                        window=g.window, rect=rect_list))
             for ev in g.events:
                 ev_adjusted = replace(ev, ts=ev.ts + time_offset)
-                if g.window and g.recorded_rect and ev_adjusted.x is not None and ev_adjusted.y is not None:
-                    ev_adjusted = replace(ev_adjusted, x=ev_adjusted.x + g.recorded_rect.left,
-                                          y=ev_adjusted.y + g.recorded_rect.top)
+                if g.window and g.recorded_rect:
+                    ev_adjusted = offset_event(ev_adjusted, g.recorded_rect.left, g.recorded_rect.top)
                 flat.append(ev_adjusted)
 
             time_offset += group_end_time
@@ -171,10 +170,8 @@ class TableModel:
             group[0].label = labels.get(iid)
             for i, ev in enumerate(group):
                 ev.instr = instr_no if i == 0 else None
-                if (current_window and current_rect
-                        and ev.x is not None and ev.y is not None):
-                    ev = replace(ev, x=ev.x - current_rect.left,
-                                 y=ev.y - current_rect.top)
+                if current_window and current_rect:
+                    ev = offset_event(ev, -current_rect.left, -current_rect.top)
                 current_events.append(ev)
                 if event_to_iid is not None:
                     event_to_iid[id(ev)] = iid

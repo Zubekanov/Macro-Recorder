@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Optional
 
@@ -110,6 +110,32 @@ class MacroEvent:
             capture_var=d.get("capture_var"),
             capture_var_y=d.get("capture_var_y"),
         )
+
+
+# Event types whose dx/dy hold a second absolute coordinate (a destination or
+# a region corner) rather than a delta, so they shift with the window origin.
+_CORNER_TYPES = ("mouse_move_timed", "ocr_read", "match_image", "match_text")
+
+
+def offset_event(ev: MacroEvent, dx: int, dy: int) -> MacroEvent:
+    """Return ``ev`` with its numeric screen coordinates shifted by (dx, dy).
+
+    Shifts x/y, and dx/dy too for the types where those are coordinates rather
+    than deltas.  Expression-valued (string) coordinates are left untouched;
+    they only get a value at playback.  Returns ``ev`` itself when nothing
+    needs shifting.
+    """
+    changes = {}
+    if isinstance(ev.x, (int, float)):
+        changes["x"] = ev.x + dx
+    if isinstance(ev.y, (int, float)):
+        changes["y"] = ev.y + dy
+    if ev.type in _CORNER_TYPES:
+        if isinstance(ev.dx, (int, float)):
+            changes["dx"] = ev.dx + dx
+        if isinstance(ev.dy, (int, float)):
+            changes["dy"] = ev.dy + dy
+    return replace(ev, **changes) if changes else ev
 
 
 # ---------------------------------------------------------------------------
