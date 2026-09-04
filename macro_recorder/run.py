@@ -8,7 +8,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from macro_recorder.bundling import bundle_events
 from macro_recorder.event_types import EventType
-from macro_recorder.expressions import ExpressionError, evaluate
+from macro_recorder.expressions import evaluate
 from macro_recorder.macro import MacroEvent, MacroGroup, load_macro, save_macro
 from macro_recorder.overlay_renderer import OverlayRenderer
 from macro_recorder.table_model import TableModel
@@ -610,19 +610,10 @@ class MacroRecorderApp:
         if not groups or all(not g.events for g in groups):
             messagebox.showinfo("Nothing to play", "No events in the table.")
             return
-        # Speed and Repeat may be plain numbers or expressions.  They are
-        # evaluated once, here, against an empty variable store (variables only
-        # gain values during playback), so a constant expression like "2*3"
-        # works but a variable reference resolves to 0.
         try:
-            speed = float(evaluate(self._speed_var.get(), {}))
-            repeat = int(evaluate(self._repeat_var.get(), {}))
-            window_timeout = float(self._timeout_var.get())
-        except (ValueError, ExpressionError):
-            messagebox.showerror(
-                "Invalid settings",
-                "Speed and Repeat must be numbers/expressions and Timeout a number.",
-            )
+            speed, repeat, window_timeout = self._read_playback_settings()
+        except ValueError as e:
+            messagebox.showerror("Invalid settings", str(e))
             return
 
         self._playing = True
@@ -657,6 +648,33 @@ class MacroRecorderApp:
             self.root.after(0, lambda: self._on_playback_complete(error))
 
         threading.Thread(target=_run, daemon=True).start()
+
+    def _read_playback_settings(self) -> tuple[float, int, float]:
+        """Parse the Speed, Repeat and Timeout entries.
+
+        Speed and Repeat may be constant expressions (``2*3``).  They are
+        evaluated before playback against an empty variable store, so a
+        variable reference is an error.  Raises ValueError naming the field.
+        """
+        values = []
+        for name, var, cast in (("Speed", self._speed_var, float),
+                                ("Repeat", self._repeat_var, int)):
+            try:
+                values.append(cast(evaluate(var.get().strip() or "0", {})))
+            except (ValueError, ArithmeticError, TypeError) as e:
+                raise ValueError("%s: %s" % (name, e)) from e
+        try:
+            values.append(float(self._timeout_var.get()))
+        except ValueError:
+            raise ValueError("Timeout must be a number of seconds.") from None
+        speed, repeat, timeout = values
+        if speed <= 0:
+            raise ValueError("Speed must be greater than 0.")
+        if repeat < 0:
+            raise ValueError("Repeat must be 0 (forever) or more.")
+        if timeout < 0:
+            raise ValueError("Timeout must be 0 or more.")
+        return speed, repeat, timeout
 
     def _stop_playback(self) -> None:
         if self._player:
