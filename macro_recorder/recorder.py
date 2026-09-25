@@ -19,7 +19,7 @@ from macro_recorder.macro import (
     serialize_button,
     serialize_key,
 )
-from macro_recorder.window_manager import get_window_manager
+from macro_recorder.window_manager import WindowInfo, get_window_manager
 
 log = logging.getLogger(__name__)
 
@@ -88,10 +88,13 @@ class Recorder:
     - The stop key itself is never included in the recorded events.
     - Thread-safe: callbacks run in separate daemon threads; shared state
       is protected by a threading.Lock.
-    - Window focus monitoring uses SetWinEventHook (Windows only); the
-      feature silently no-ops on other platforms.
+    - Window focus changes come from the platform window manager's
+      ``watch_foreground`` (a WinEvent hook on Windows, _NET_ACTIVE_WINDOW on
+      X11).  Where no window manager backend exists the feature no-ops.
     - On Windows, recording keystrokes from elevated (UAC) windows
       requires running Python as Administrator.
+    - On Linux the listeners need an X11 session (XRecord); Wayland sessions
+      do not deliver global input events.
     """
 
     def __init__(self, stop_key: str = "Key.f6") -> None:
@@ -103,7 +106,6 @@ class Recorder:
         self._start_time: float = 0.0
         self._last_mouse_pos: Optional[tuple[int, int]] = None
         self._last_window_title: str = ""
-        self._focus_thread_id: int = 0
         self._wm = get_window_manager()
 
     # ------------------------------------------------------------------
@@ -128,17 +130,15 @@ class Recorder:
         self._events = []
         self._stop_event.clear()
         self._last_mouse_pos = None
-        self._last_window_title = self._get_foreground_title()
-        self._focus_thread_id = 0
+        foreground = self._wm.get_foreground()
+        self._last_window_title = foreground.title if foreground else ""
         self._start_time = time.perf_counter()
 
-        # Start window-focus monitor (Windows-only; silently skipped elsewhere)
-        focus_ready = threading.Event()
-        focus_thread = threading.Thread(
-            target=self._run_window_monitor, args=(focus_ready,), daemon=True,
-        )
+        # Window-focus monitor: the window manager backend reports changes
+        # until the stop event is set.  Runs on its own thread because the
+        # Win32 hook and the X11 watcher both block in their own event loops.
+        focus_thread = threading.Thread(target=self._run_window_monitor, daemon=True)
         focus_thread.start()
-        focus_ready.wait(timeout=1.0)   # give the thread time to register its hook
 
         mouse_listener = mouse.Listener(
             on_move=self._on_mouse_move,
@@ -155,16 +155,7 @@ class Recorder:
 
         self._stop_event.wait()  # blocks until stop key or Recorder.stop()
 
-        # Tear down window monitor by posting WM_QUIT to its message loop
-        if self._focus_thread_id:
-            try:
-                import ctypes
-                ctypes.windll.user32.PostThreadMessageW(
-                    self._focus_thread_id, 0x0012, 0, 0,  # WM_QUIT
-                )
-            except Exception as e:
-                log.debug("Failed to post WM_QUIT to focus monitor thread: %s", e)
-        focus_thread.join(timeout=1.0)
+        focus_thread.join(timeout=2.0)   # the watcher polls the stop event
 
         mouse_listener.stop()
         kb_listener.stop()
@@ -174,104 +165,27 @@ class Recorder:
         return self._build_groups(collapse_drags(list(self._events)))
 
     # ------------------------------------------------------------------
-    # Window focus monitoring (Windows only)
+    # Window focus monitoring
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _get_foreground_title() -> str:
-        """Return the title of the currently active window, or empty string."""
+    def _run_window_monitor(self) -> None:
+        """Block on the window manager's foreground watcher until stopped."""
         try:
-            import ctypes
-            user32 = ctypes.windll.user32
-            hwnd = user32.GetForegroundWindow()
-            length = user32.GetWindowTextLengthW(hwnd)
-            buf = ctypes.create_unicode_buffer(max(length + 1, 256))
-            user32.GetWindowTextW(hwnd, buf, len(buf))
-            return buf.value
-        except Exception as e:
-            log.debug("Could not read foreground window title: %s", e)
-            return ""
-
-    def _run_window_monitor(self, ready: threading.Event) -> None:
-        """Run a WinEvent hook loop that fires on foreground-window changes.
-
-        Runs until WM_QUIT is posted to this thread's message queue.
-        Silently exits on non-Windows platforms or any hook failure.
-        """
-        try:
-            import ctypes
-            import ctypes.wintypes
-
-            user32 = ctypes.windll.user32
-            self._focus_thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
-            ready.set()   # unblock start() once we have our thread ID
-
-            EVENT_SYSTEM_FOREGROUND = 0x0003
-            WINEVENT_OUTOFCONTEXT = 0x0000
-
-            WinEventProc = ctypes.WINFUNCTYPE(
-                None,
-                ctypes.wintypes.HANDLE,  # hWinEventHook
-                ctypes.wintypes.DWORD,   # event
-                ctypes.wintypes.HWND,    # hwnd
-                ctypes.wintypes.LONG,    # idObject
-                ctypes.wintypes.LONG,    # idChild
-                ctypes.wintypes.DWORD,   # dwEventThread
-                ctypes.wintypes.DWORD,   # dwmsEventTime
-            )
-
-            def _on_foreground(hWinEventHook, event, hwnd, idObject, idChild,
-                               dwEventThread, dwmsEventTime) -> None:
-                if not hwnd:
-                    return
-                length = user32.GetWindowTextLengthW(hwnd)
-                buf = ctypes.create_unicode_buffer(max(length + 1, 256))
-                user32.GetWindowTextW(hwnd, buf, len(buf))
-                title = buf.value
-                if title and title != self._last_window_title:
-                    self._last_window_title = title
-                    rect = ctypes.wintypes.RECT()
-                    rect_list = None
-                    if user32.GetWindowRect(hwnd, ctypes.byref(rect)):
-                        rect_list = [
-                            rect.left, rect.top,
-                            rect.right - rect.left, rect.bottom - rect.top,
-                        ]
-                    self._append_event(MacroEvent(
-                        type=EventType.WINDOW_FOCUS,
-                        ts=self._ts(),
-                        window=title,
-                        rect=rect_list,
-                    ))
-
-            # Keep a reference so the callback is not garbage-collected
-            proc = WinEventProc(_on_foreground)
-
-            hook = user32.SetWinEventHook(
-                EVENT_SYSTEM_FOREGROUND,
-                EVENT_SYSTEM_FOREGROUND,
-                None,
-                proc,
-                0, 0,
-                WINEVENT_OUTOFCONTEXT,
-            )
-            if not hook:
-                return
-
-            msg = ctypes.wintypes.MSG()
-            while True:
-                result = user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
-                if result == 0 or result == -1:
-                    break
-                user32.TranslateMessage(ctypes.byref(msg))
-                user32.DispatchMessageW(ctypes.byref(msg))
-
-            user32.UnhookWinEvent(hook)
-
+            self._wm.watch_foreground(self._on_foreground_change, self._stop_event)
         except Exception as e:
             log.debug("Window focus monitor exited on error: %s", e)
-        finally:
-            ready.set()   # ensure start() never blocks indefinitely on failure
+
+    def _on_foreground_change(self, info: WindowInfo) -> None:
+        """Record a window_focus marker when a different titled window activates."""
+        if not info.title or info.title == self._last_window_title:
+            return
+        self._last_window_title = info.title
+        self._append_event(MacroEvent(
+            type=EventType.WINDOW_FOCUS,
+            ts=self._ts(),
+            window=info.title,
+            rect=[info.left, info.top, info.width, info.height],
+        ))
 
     # ------------------------------------------------------------------
     # Internal helpers

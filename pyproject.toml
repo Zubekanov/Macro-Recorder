@@ -1,16 +1,19 @@
 [project]
 name = "macro-recorder"
 version = "0.1.0"
-description = "Record, edit and replay mouse and keyboard macros on Windows"
+description = "Record, edit and replay mouse and keyboard macros on Windows and Linux (X11)"
 requires-python = ">=3.12"
 dependencies = [
-    "pyautogui>=0.9.54",
     "pynput>=1.7.6",
-    "pywin32>=305; sys_platform == 'win32'",
     "Pillow>=9",
-    "winsdk>=1.0.0b10; sys_platform == 'win32'",
     "mss>=9",
     "opencv-python>=4.8",
+    # Windows: window management and the built-in OCR engine.
+    "pywin32>=305; sys_platform == 'win32'",
+    "winsdk>=1.0.0b10; sys_platform == 'win32'",
+    # Linux (X11): window management, overlay shaping and Tesseract OCR.
+    "python-xlib>=0.33; sys_platform == 'linux'",
+    "pytesseract>=0.3.10; sys_platform == 'linux'",
 ]
 
 [project.scripts]
