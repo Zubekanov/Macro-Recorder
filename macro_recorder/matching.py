@@ -21,7 +21,7 @@ class MatchError(RuntimeError):
     """Raised when a screen region cannot be captured or matched."""
 
 
-def _grab(region):
+def grab_region(region):
     """Capture (left, top, width, height) as a PIL RGB image via mss."""
     try:
         import mss
@@ -70,7 +70,7 @@ def find_image(region, needle_path: str, confidence: float) -> Optional[tuple]:
     if needle is None:
         raise MatchError("Could not read image file: %r" % needle_path)
 
-    haystack = cv2.cvtColor(np.array(_grab(region)), cv2.COLOR_RGB2BGR)
+    haystack = cv2.cvtColor(np.array(grab_region(region)), cv2.COLOR_RGB2BGR)
     nh, nw = needle.shape[:2]
     if nh > haystack.shape[0] or nw > haystack.shape[1]:
         raise MatchError("Reference image is larger than the search region.")
@@ -111,6 +111,6 @@ def match_text(region, expected: str, tolerance: float) -> tuple:
     (OCR errors propagate as OcrError).
     """
     from macro_recorder.ocr import ocr_image
-    text = ocr_image(_grab(region))
+    text = ocr_image(grab_region(region))
     ratio = _similarity(text, expected)
     return (text, ratio, ratio >= tolerance)
