@@ -1,5 +1,6 @@
 import collections
 import copy
+import sys
 import threading
 import time
 from pathlib import Path
@@ -2084,7 +2085,7 @@ class MacroRecorderApp:
                 listener[0].suppress_event()   # consumes the event (raises)
 
         def on_click(x_pos, y_pos, button, pressed):
-            """Fallback capture for non-Windows, where the filter never runs."""
+            """Capture on X11 (and any platform where the Win32 filter never runs)."""
             if not targeting_active[0] or not pressed or _on_instr_window(x_pos, y_pos):
                 return True
             if captured[0] is None:
@@ -2097,8 +2098,11 @@ class MacroRecorderApp:
         instr_window.protocol("WM_DELETE_WINDOW", cleanup)
         instr_window.focus_force()
 
-        # Start global mouse listener; the filter consumes the click on Windows.
-        listener[0] = mouse.Listener(on_click=on_click, win32_event_filter=win32_event_filter)
+        # Start the global mouse listener.  On Windows the filter consumes the
+        # click; on X11 ``suppress`` grabs the pointer so the click reaches
+        # on_click but never the window underneath.
+        listener[0] = mouse.Listener(on_click=on_click, win32_event_filter=win32_event_filter,
+                                     suppress=sys.platform != "win32")
         listener[0].start()
 
     def _on_close(self) -> None:

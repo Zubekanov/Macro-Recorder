@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Macro Recorder
+Comment=Record, edit and replay mouse and keyboard macros
+Exec=@UV@ run --project @REPO@ macro-recorder
+Path=@REPO@
+Icon=input-mouse
+Terminal=false
+Categories=Utility;
+Keywords=macro;automation;record;replay;
