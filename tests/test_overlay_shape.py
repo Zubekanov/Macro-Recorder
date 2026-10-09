@@ -1,10 +1,13 @@
 """Overlay shaping: the pure rectangle cover and, under X11, the real window shape."""
 
 import sys
-import tkinter as tk
+import pytest
+tk = pytest.importorskip("tkinter")
 import unittest
 
 import pytest
+
+pytestmark = pytest.mark.live_x
 
 from macro_recorder.event_types import EventType
 from macro_recorder.macro import MacroEvent

@@ -4,9 +4,12 @@ Skipped when no display is available.  Nothing here records or plays, so no
 global hooks are installed; the screen overlay is replaced with a stub.
 """
 
-import tkinter as tk
+import pytest
+tk = pytest.importorskip("tkinter")
 
 import pytest
+
+pytestmark = pytest.mark.live_x
 
 from macro_recorder.event_types import EventType
 from macro_recorder.macro import MacroEvent, MacroGroup, WindowRect, load_macro

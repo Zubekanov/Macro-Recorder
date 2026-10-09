@@ -3,11 +3,14 @@ round trip against a Tk window.  The live tests skip without an X display."""
 
 import os
 import threading
-import tkinter as tk
+import pytest
+tk = pytest.importorskip("tkinter")
 import unittest
 from unittest import mock
 
 import pytest
+
+pytestmark = pytest.mark.live_x
 
 from macro_recorder import window_manager as wm_mod
 from macro_recorder.window_manager import (
