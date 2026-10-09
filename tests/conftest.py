@@ -309,6 +309,12 @@ class FakeWindows:
     def screen_size(self):
         return (1920, 1080)
 
+    def window_at(self, x, y):
+        for w in self.windows:
+            if w.rect.contains(x, y):
+                return w.id
+        return None
+
 
 class FakeHost:
     """Records player callbacks; ``answers`` feeds ``ask``."""

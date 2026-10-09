@@ -96,6 +96,8 @@ class WindowManager(Protocol):
     def monitors(self) -> list[Monitor]: ...
     def bell(self) -> None: ...
     def screen_size(self) -> tuple[int, int]: ...
+    def window_at(self, x: int, y: int) -> int | None:
+        """The top-level window id under a screen point, or None."""
 
 
 class InputBackend(Protocol):
@@ -196,6 +198,24 @@ class PlayContext(Protocol):
     def unhold_button(self, name: str) -> None: ...
     def reactivate_context(self) -> None:
         """Re-focus the current window context after a dialog or pause."""
+    def enter_window(self, row: Any) -> Any:
+        """Run a window row's focus logic and make it the context.
+
+        Returns Flow.NEXT, a Jump or an Abort exactly like an action's play.
+        """
+    def move_pointer(self, points: Sequence[tuple[float, float]], duration_ms: float,
+                     dts: Sequence[float] | None = None) -> bool:
+        """Move through screen points.
+
+        With ``dts`` (seconds per point) under path mode ``recorded`` the points
+        replay with their timing; otherwise the engine draws the document's
+        path mode from the current pointer to the last point over
+        ``duration_ms``.  Returns True when playback was stopped meanwhile.
+        """
+    def row_state(self, row_id: int) -> dict:
+        """Mutable per-row state (repeat counters); cleared at each program pass."""
+    def run_command(self, command: str, wait: bool, timeout_ms: float = 0) -> int | None:
+        """Run a shell command (see exec_program).  Exit code when waited for."""
 
 
 # ---------------------------------------------------------------------------
