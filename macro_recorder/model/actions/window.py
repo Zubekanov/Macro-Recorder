@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from macro_recorder.model.actions._common import boolean, choice, duration, label_target, text
-from macro_recorder.model.catalogue import ActionSpec, FieldKind, FieldSpec, Preset, make, register
+from macro_recorder.model.catalogue import (
+    Abort, ActionSpec, FieldKind, FieldSpec, Flow, Jump, Preset, make, register,
+)
 from macro_recorder.model.document import Row
 from macro_recorder.model.events import EventType
-from macro_recorder.model.protocols import OverlayShape
+from macro_recorder.model.protocols import OverlayShape, PlayContext
 
 
 def _describe(row: Row) -> str:
@@ -27,6 +29,11 @@ def _overlay(row: Row) -> OverlayShape | None:
     return OverlayShape("rect", ((float(l), float(t)), (float(l + w), float(t + h))))
 
 
+def _play(ctx: PlayContext, row: Row) -> Flow | Jump | Abort:
+    """The engine owns window matching, activation, restore and the context."""
+    return ctx.enter_window(row)
+
+
 WINDOW_FOCUS = register(ActionSpec(
     type=EventType.WINDOW_FOCUS.value, name="Window Focus", category="Window",
     fields=(
@@ -43,5 +50,5 @@ WINDOW_FOCUS = register(ActionSpec(
         choice("restore_rect", "Restore position", ("default", "yes", "no"), "default"),
     ),
     presets=(Preset("Window focus", None, lambda: make("window_focus", window="")),),
-    describe=_describe, overlay=_overlay,
+    describe=_describe, overlay=_overlay, play=_play,
 ))
