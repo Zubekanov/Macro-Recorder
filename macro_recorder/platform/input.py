@@ -61,20 +61,31 @@ class SyntheticKeys:
 
     Every synthetic KeyPress is noted with its time; the fallback consumes
     one note per recorded press of the same keycode, so a synthetic press is
-    never taken for the user's.  Notes older than ``ttl_s`` expire.  A held
-    synthetic key also suppresses its autorepeat.
+    never taken for the user's.  Notes older than ``ttl_s`` expire and at
+    most ``limit`` are kept per keycode, so a long playback holds no more
+    than a few seconds of notes.  A held synthetic key also suppresses its
+    autorepeat.
     """
 
-    def __init__(self, ttl_s: float = 2.0, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(self, ttl_s: float = 2.0, clock: Callable[[], float] = time.monotonic,
+                 limit: int = 256) -> None:
         self._ttl = ttl_s
         self._clock = clock
+        self._limit = limit
         self._pending: dict[int, deque[float]] = {}
         self._held: set[int] = set()
         self._lock = threading.Lock()
 
+    def _expire(self, pending: deque[float]) -> None:
+        cutoff = self._clock() - self._ttl
+        while pending and pending[0] < cutoff:
+            pending.popleft()
+
     def press(self, keycode: int) -> None:
         with self._lock:
-            self._pending.setdefault(keycode, deque()).append(self._clock())
+            pending = self._pending.setdefault(keycode, deque(maxlen=self._limit))
+            self._expire(pending)
+            pending.append(self._clock())
             self._held.add(keycode)
 
     def release(self, keycode: int) -> None:
@@ -91,9 +102,7 @@ class SyntheticKeys:
             pending = self._pending.get(keycode)
             if not pending:
                 return False
-            cutoff = self._clock() - self._ttl
-            while pending and pending[0] < cutoff:
-                pending.popleft()
+            self._expire(pending)
             if not pending:
                 return False
             pending.popleft()
@@ -101,7 +110,11 @@ class SyntheticKeys:
 
     def count(self, keycode: int) -> int:
         with self._lock:
-            return len(self._pending.get(keycode, ()))
+            pending = self._pending.get(keycode)
+            if not pending:
+                return 0
+            self._expire(pending)
+            return len(pending)
 
 
 class CoreEventTranslator:
@@ -261,16 +274,24 @@ class XTestInput:
             self._key(keycode, False)
 
     def type_char(self, char: str) -> None:
-        """Press and release whatever produces ``char``, with Shift or Level 3 as needed."""
-        keysym = x11.keysym_for_char(char)
+        """Press and release whatever produces ``char``, with Shift or Level 3 as needed.
+
+        The keymap may hold ``char`` as its Unicode keysym or a legacy one
+        (EuroSign); either is used before a spare keycode is borrowed.
+        """
+        keysyms = x11.keysyms_for_char(char)
         with self._lock:
             self._refresh_keymap()
-            found = self._kmap.find(keysym)
             level3_key = self._kmap.keycode_for(x11.keysym_from_name("ISO_Level3_Shift"))
-            if found is not None and found[1] >= 4 and (level3_key is None
-                                                         or not self._kmap.level3_mask):
+            can_level3 = level3_key is not None and bool(self._kmap.level3_mask)
+            found = None
+            for keysym in keysyms:
+                found = self._kmap.find(keysym)
+                if found is not None and (found[1] < 4 or can_level3):
+                    break
                 found = None
             if found is None:
+                keysym = keysyms[0]
                 keycode = self._borrower.borrow(keysym, busy=self._held_keys)
                 if keycode is None:
                     raise ValueError("No spare keycode to type %r" % char)
@@ -491,7 +512,9 @@ class XGrabHotkeys:
     """``HotkeyGrabber``: XGrabKey on the root, events read on a thread.
 
     Callbacks run on the grabber's thread.  An autorepeated press (a press
-    with the same server time as the release before it) is ignored.
+    with the same server time as the release before it) is ignored.  While
+    suspended, :meth:`grab` only records the combo; :meth:`resume` grabs
+    and reports the combos the server refused.
     """
 
     def __init__(self, display_name: str | None = None) -> None:
@@ -540,9 +563,10 @@ class XGrabHotkeys:
             self._ungrab_locked()
             self._combos.clear()
 
-    def _ungrab_locked(self) -> None:
+    def _ungrab_locked(self, kmap: x11.KeyboardMap | None = None) -> None:
+        """Ungrab every active combo in the lock variants of ``kmap`` (default the current)."""
         for keycode, mask in self._active:
-            x11.ungrab_key(self._d, keycode, mask, self._kmap)
+            x11.ungrab_key(self._d, keycode, mask, kmap or self._kmap)
         self._active.clear()
 
     def suspend(self) -> None:
@@ -551,24 +575,41 @@ class XGrabHotkeys:
             self._suspended = True
             self._ungrab_locked()
 
-    def resume(self) -> None:
+    def resume(self) -> list[str]:
+        """Grab the kept combos again; returns those that could not be grabbed."""
         with self._lock:
             self._suspended = False
-            self._regrab_locked()
+            return self._regrab_locked()
 
-    def _regrab_locked(self) -> None:
+    def _regrab_locked(self) -> list[str]:
         self._ungrab_locked()
+        failed = []
         for combo, (_, _, callback) in list(self._combos.items()):
             try:
                 keycode, mask = self._resolve(combo)
             except ValueError as e:
                 log.warning("Hotkey %s cannot be grabbed: %s", combo, e)
+                failed.append(combo)
                 continue
             self._combos[combo] = (keycode, mask, callback)
             if x11.grab_key(self._d, keycode, mask, self._kmap):
                 self._active[(keycode, mask)] = callback
             else:
                 log.warning("Hotkey %s is grabbed by another application", combo)
+                failed.append(combo)
+        return failed
+
+    def _grabs_changed_locked(self, old: x11.KeyboardMap) -> bool:
+        """True when a keymap change moved a combo or the lock masks a grab covers."""
+        if x11.lock_variants(old) != x11.lock_variants(self._kmap):
+            return True
+        for combo, (keycode, mask, _) in self._combos.items():
+            try:
+                if self._resolve(combo) != (keycode, mask):
+                    return True
+            except ValueError:
+                return True
+        return False
 
     def _run(self) -> None:
         from Xlib.error import ConnectionClosedError, XError
@@ -592,8 +633,9 @@ class XGrabHotkeys:
 
     def _handle(self, ev: Any, fire: list[Callable[[], None]]) -> None:
         if ev.type == X.MappingNotify and ev.request in (X.MappingKeyboard, X.MappingModifier):
-            self._kmap = x11.KeyboardMap.from_display(self._d)
-            if not self._suspended:
+            old, self._kmap = self._kmap, x11.KeyboardMap.from_display(self._d)
+            if not self._suspended and self._grabs_changed_locked(old):
+                self._ungrab_locked(old)
                 self._regrab_locked()
         elif ev.type == X.KeyRelease:
             self._last_release[int(ev.detail)] = int(ev.time)

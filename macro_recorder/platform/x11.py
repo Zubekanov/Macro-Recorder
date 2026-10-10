@@ -303,8 +303,11 @@ def window_at(d, x: int, y: int) -> int | None:
 
     Walks down from the root through the viewable windows containing the
     point and returns the first that carries WM_STATE (the client window
-    under a reparenting window manager), else the root's child (no window
-    manager, or an override-redirect window such as the overlay).
+    under a reparenting window manager).  When the walk ends on a frame
+    without reaching a client (the point is on the title bar or border),
+    the client inside the frame is returned, as XmuClientWindow finds it.
+    Otherwise the root's child (no window manager, or an override-redirect
+    window such as the overlay).
     """
     from Xlib.error import XError
 
@@ -321,9 +324,26 @@ def window_at(d, x: int, y: int) -> int | None:
             if not child:
                 break
             current = window(d, child)
+        return client_in(d, window(d, top)) or top
     except XError as e:
         log.debug("window_at(%d, %d) stopped early: %s", x, y, e)
     return top
+
+
+def client_in(d, win, max_depth: int = 4) -> int | None:
+    """The first window carrying WM_STATE below ``win``, breadth first, or None."""
+    level = [win]
+    for _ in range(max_depth):
+        below = []
+        for w in level:
+            for child in w.query_tree().children:
+                if _has_wm_state(d, child):
+                    return _xid(child)
+                below.append(child)
+        if not below:
+            break
+        level = below
+    return None
 
 
 def current_desktop(d) -> int | None:
@@ -434,10 +454,13 @@ def set_maximised(d, xid: int, maximised: bool) -> bool:
 # ---------------------------------------------------------------------------
 
 def watch_active_window(callback: Callable[[WindowInfo], None], stop_event: threading.Event,
-                        poll_interval: float = 0.25, display_name: str | None = None) -> None:
-    """Call ``callback`` for the active window and every change, until ``stop_event``.
+                        poll_interval: float = 0.25, display_name: str | None = None,
+                        ready: threading.Event | None = None) -> None:
+    """Call ``callback`` for every change of active window, until ``stop_event``.
 
-    Wakes on _NET_ACTIVE_WINDOW property changes for a prompt reaction and
+    The window active at the start is not reported; ``active_window_id``
+    reads it.  ``ready`` is set once that starting window is known, so every
+    change after it is reported.  A callback that raises is logged and watching goes on.  Wakes on _NET_ACTIVE_WINDOW property changes for a prompt reaction and
     re-checks every ``poll_interval`` seconds, which is what makes it work
     without a window manager as well.
     """
@@ -446,7 +469,9 @@ def watch_active_window(callback: Callable[[WindowInfo], None], stop_event: thre
         root = d.screen().root
         root.change_attributes(event_mask=X.PropertyChangeMask)
         d.flush()
-        last_id: int | None = None
+        last_id = active_window_id(d)
+        if ready is not None:
+            ready.set()
         fd = d.fileno()
         while not stop_event.is_set():
             readable, _, _ = select.select([fd], [], [], poll_interval)
@@ -458,7 +483,10 @@ def watch_active_window(callback: Callable[[WindowInfo], None], stop_event: thre
                 last_id = xid
                 info = read_window(d, xid) if xid else None
                 if info is not None:
-                    callback(info)
+                    try:
+                        callback(info)
+                    except Exception:
+                        log.exception("Active-window callback failed")
     finally:
         d.close()
 
@@ -547,8 +575,17 @@ for _group in Xlib.keysymdef.__all__:
 _PREFERRED_NAMES: tuple[str, ...] = NAMED_KEYS + ("Mode_switch", "Multi_key", "ISO_Left_Tab")
 
 
+# Standard keysyms python-xlib's tables lack.
+_EXTRA_KEYSYMS: dict[str, int] = {
+    "EcuSign": 0x20A0, "ColonSign": 0x20A1, "CruzeiroSign": 0x20A2, "FFrancSign": 0x20A3,
+    "LiraSign": 0x20A4, "MillSign": 0x20A5, "NairaSign": 0x20A6, "PesetaSign": 0x20A7,
+    "RupeeSign": 0x20A8, "WonSign": 0x20A9, "NewSheqelSign": 0x20AA, "DongSign": 0x20AB,
+    "EuroSign": 0x20AC, "OE": 0x13BC, "oe": 0x13BD, "Ydiaeresis": 0x13BE,
+}
+
+
 def _build_name_tables() -> tuple[dict[str, int], dict[int, str]]:
-    by_name: dict[str, int] = {}
+    by_name: dict[str, int] = dict(_EXTRA_KEYSYMS)
     for attr, value in vars(XK).items():
         if not attr.startswith("XK_") or not isinstance(value, int):
             continue
@@ -622,28 +659,91 @@ def keysym_for_char(char: str) -> int:
     return 0x01000000 | code
 
 
+# Legacy keysym pages that follow an 8-bit character set: (page, codec, first
+# byte, last byte).  Keysym ``page | byte`` is the codec's character for
+# ``byte``; only values that are named keysyms are used.
+_LEGACY_PAGES: tuple[tuple[int, str, int, int], ...] = (
+    (0x100, "iso8859_2", 0xA1, 0xFF),       # Latin-2
+    (0x200, "iso8859_3", 0xA1, 0xFF),       # Latin-3
+    (0x300, "iso8859_4", 0xA1, 0xFF),       # Latin-4
+    (0x500, "iso8859_6", 0xAC, 0xF2),       # Arabic
+    (0x600, "koi8_r", 0xC0, 0xFF),          # Cyrillic letters, in KOI8 order
+    (0x700, "iso8859_7", 0xC1, 0xF9),       # Greek letters
+    (0xC00, "iso8859_8", 0xDF, 0xFA),       # Hebrew
+    (0xD00, "tis_620", 0xA1, 0xF9),         # Thai
+)
+
+
+def _build_legacy_tables() -> tuple[dict[str, int], dict[int, str]]:
+    by_char: dict[str, int] = {}
+    for page, codec, first, last in _LEGACY_PAGES:
+        for byte in range(first, last + 1):
+            keysym = page | byte
+            if keysym not in _NAME_BY_KEYSYM:
+                continue
+            try:
+                char = bytes([byte]).decode(codec)
+            except UnicodeDecodeError:
+                continue
+            by_char.setdefault(char, keysym)
+    # X puts the sigmas where ISO 8859-7 does not: Greek_SIGMA, Greek_sigma
+    # and Greek_finalsmallsigma.
+    by_char.update({"\u03a3": 0x7D2, "\u03c3": 0x7F2, "\u03c2": 0x7F3})
+    for keysym in range(0x20A0, 0x20AD):                    # currency: EcuSign..EuroSign
+        by_char.setdefault(chr(keysym), keysym)
+    for keysym, char in ((0x13BC, "\u0152"), (0x13BD, "\u0153"), (0x13BE, "\u0178")):
+        by_char.setdefault(char, keysym)                    # Latin-9: OE, oe, Ydiaeresis
+    return by_char, {keysym: char for char, keysym in by_char.items()}
+
+
+_LEGACY_BY_CHAR, _CHAR_BY_LEGACY = _build_legacy_tables()
+
+
+def legacy_keysym_for_char(char: str) -> int | None:
+    """The pre-Unicode keysym for ``char`` (EuroSign, Cyrillic_a), or None."""
+    return _LEGACY_BY_CHAR.get(char)
+
+
+def keysyms_for_char(char: str) -> list[int]:
+    """Every keysym a keymap may use for ``char``: the Unicode form, then the legacy one."""
+    keysyms = [keysym_for_char(char)]
+    legacy = legacy_keysym_for_char(char)
+    if legacy is not None and legacy not in keysyms:
+        keysyms.append(legacy)
+    return keysyms
+
+
 def _keysym_char(keysym: int) -> str | None:
     if 0x20 <= keysym < 0x100:
         return chr(keysym)
     if keysym & 0xFF000000 == 0x01000000:
         return chr(keysym & 0x00FFFFFF)
-    return None
+    return _CHAR_BY_LEGACY.get(keysym)
 
 
-def _char_keysym(char: str) -> int:
+def _char_keysym(char: str, legacy: bool) -> int | None:
+    if legacy:
+        return _LEGACY_BY_CHAR.get(char)
     code = ord(char)
     return code if code < 0x100 else 0x01000000 | code
 
 
 def keysym_case(keysym: int) -> tuple[int, int] | None:
-    """``(lower, upper)`` when the keysym is a letter with two cases, else None."""
+    """``(lower, upper)`` when the keysym is a letter with two cases, else None.
+
+    Both keysyms are of the same kind as ``keysym``: legacy for a legacy one.
+    """
     char = _keysym_char(keysym)
     if char is None:
         return None
     lower, upper = char.lower(), char.upper()
     if lower == upper or len(lower) != 1 or len(upper) != 1:
         return None
-    return _char_keysym(lower), _char_keysym(upper)
+    legacy = keysym in _CHAR_BY_LEGACY
+    pair = _char_keysym(lower, legacy), _char_keysym(upper, legacy)
+    if pair[0] is None or pair[1] is None:
+        return None
+    return pair[0], pair[1]
 
 
 def is_keypad(keysym: int) -> bool:

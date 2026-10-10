@@ -175,3 +175,49 @@ def test_stop_releases_grabs_and_stop_key(h):
     h.enter("recording")
     h.router.stop()
     assert h.grabber.grabbed == {} and h.stop_key.key is None
+
+
+class DeferredGrabber(FakeHotkeys):
+    """Like XGrabHotkeys: while suspended a grab is only recorded, and resume asks the server."""
+
+    def grab(self, combo, callback):
+        if self.suspended:
+            self.grabbed[combo] = callback
+            return True
+        return super().grab(combo, callback)
+
+    def resume(self):
+        self.suspended = False
+        refused = [c for c in self.grabbed if c in self.refuse]
+        for combo in refused:
+            del self.grabbed[combo]
+        return refused
+
+
+def test_resume_reports_a_combo_refused_after_the_settings_dialog():
+    h = Harness()
+    h.grabber = DeferredGrabber()
+    h.router._grabber = h.grabber
+    assert h.router.start() == {}
+    h.router.suspend()
+    h.settings.hotkeys.play = "ctrl+shift+p"
+    h.grabber.refuse.add("ctrl+shift+p")
+    assert h.router.start() == {}                # suspended: nothing asked yet
+    failures = h.router.resume()
+    assert failures == {"play": "Ctrl+Shift+P is in use by another application"}
+    assert h.router.failures == failures
+    assert set(h.grabber.grabbed) == {RECORD}
+
+
+def test_resume_with_a_grabber_that_reports_nothing(h):
+    h.router.suspend()
+    assert h.router.resume() == {}
+
+
+@pytest.mark.parametrize("play", [RECORD, "shift+ctrl+F9", "Control_R+shift+F9"])
+def test_same_combo_for_record_and_play_is_explained(play):
+    h = Harness()
+    h.settings.hotkeys.play = play
+    failures = h.router.start()
+    assert failures == {"play": "Record and Play use the same keys"}
+    assert set(h.grabber.grabbed) == {RECORD}

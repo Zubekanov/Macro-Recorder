@@ -25,6 +25,7 @@ from typing import Any, Callable
 from macro_recorder.model.keys import format_combo, parse_combo
 from macro_recorder.model.protocols import HotkeyGrabber, StopKeyWatcher
 from macro_recorder.platform.input import combo_problem
+from macro_recorder.platform.x11 import MODIFIER_FAMILIES
 
 log = logging.getLogger(__name__)
 
@@ -75,14 +76,19 @@ class HotkeyRouter:
     def start(self) -> dict[str, str]:
         """Grab both combos from settings, replacing earlier grabs; returns the failures.
 
-        Call again after the Settings dialog changes the combos.
+        Call again after the Settings dialog changes the combos.  While the
+        grabber is suspended the server is only asked on :meth:`resume`,
+        which reports its refusals.
         """
         self._grabber.ungrab_all()
         self._failures = {}
         hotkeys = self._settings.hotkeys
+        same = _same_combo(hotkeys.record, hotkeys.play)
         for name, combo, callback in (("record", hotkeys.record, self._on_record),
                                       ("play", hotkeys.play, self._on_play)):
             problem = combo_problem(combo)
+            if problem is None and same and name == "play":
+                problem = "Record and Play use the same keys"
             if problem is None and not self._grabber.grab(combo, callback):
                 problem = "%s is in use by another application" % _display(combo)
             if problem is not None:
@@ -94,8 +100,16 @@ class HotkeyRouter:
         """Release the grabs while the Settings dialog captures combos."""
         self._grabber.suspend()
 
-    def resume(self) -> None:
-        self._grabber.resume()
+    def resume(self) -> dict[str, str]:
+        """Grab the combos again after the dialog; returns the failures, as :meth:`start`."""
+        refused = set(self._grabber.resume() or ())
+        hotkeys = self._settings.hotkeys
+        for name, combo in (("record", hotkeys.record), ("play", hotkeys.play)):
+            if combo in refused and name not in self._failures:
+                self._failures[name] = "%s is in use by another application" % _display(combo)
+                log.warning("%s hotkey not available: %s", name.capitalize(),
+                            self._failures[name])
+        return self.failures
 
     def mode_changed(self, mode: Any) -> None:
         """Arm the stop key for the new mode: F6 while recording, Escape while playing."""
@@ -149,6 +163,17 @@ class HotkeyRouter:
             self._actions.stop_record("stop_key")
         elif mode in ("playing", "paused"):
             self._actions.stop_play()
+
+
+def _same_combo(first: str, second: str) -> bool:
+    """True when two combos press the same key with the same modifiers, in any order."""
+    def key(combo: str) -> tuple[frozenset[str], str]:
+        names = parse_combo(combo)
+        return frozenset(MODIFIER_FAMILIES.get(n, n) for n in names[:-1]), names[-1]
+    try:
+        return key(first) == key(second)
+    except ValueError:
+        return False
 
 
 def _display(combo: str) -> str:

@@ -129,7 +129,7 @@ def test_activate_of_a_vanished_window_fails(probe, wm, tk):
     assert wm.activate(info, settle_ms=200) is None
 
 
-def test_watch_active_reports_focus_changes(probe, wm, tk):
+def test_watch_active_reports_only_changes(probe, wm, tk):
     seen = []
     got_beta = threading.Event()
 
@@ -149,7 +149,7 @@ def test_watch_active_reports_focus_changes(probe, wm, tk):
         assert got_beta.wait(timeout=3.0), seen
     finally:
         stop()
-    assert seen[0] == ALPHA and seen[-1] == BETA
+    assert ALPHA not in seen and seen[-1] == BETA
 
 
 def test_window_at_finds_the_toplevel(probe, wm, display):
@@ -298,9 +298,21 @@ def test_hotkey_grab_fires_suspends_and_blocks_other_clients(injector):
         second.ungrab_all()
         tap(injector, "Control_L", "Shift_L", "F9")
         assert not fired.wait(0.3)
-        first.resume()
+        assert first.resume() == []
         tap(injector, "Control_L", "Shift_L", "F9")
         assert fired.wait(2.0)
+    finally:
+        first.close()
+        second.close()
+
+
+def test_resume_reports_a_combo_taken_while_suspended():
+    first, second = XGrabHotkeys(), XGrabHotkeys()
+    try:
+        first.suspend()
+        assert first.grab("ctrl+shift+F8", lambda: None)             # only recorded
+        assert second.grab("ctrl+shift+F8", lambda: None)
+        assert first.resume() == ["ctrl+shift+F8"]
     finally:
         first.close()
         second.close()

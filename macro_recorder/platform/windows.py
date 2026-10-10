@@ -201,18 +201,28 @@ class X11WindowManager:
         return info
 
     def watch_active(self, callback: Callable[[WindowInfo], None]) -> Callable[[], None]:
-        """Report the active window now and on every change until the returned stop is called."""
+        """Report every change of active window until the returned stop is called.
+
+        The window active at the start is not reported; :meth:`active` reads
+        it.  Returns once the watcher knows the starting window, so a change
+        made after the call is always reported.
+        """
         stop_event = threading.Event()
+        ready = threading.Event()
 
         def run() -> None:
             from Xlib.error import ConnectionClosedError, XError
             try:
-                x11.watch_active_window(callback, stop_event, display_name=self._display_name)
+                x11.watch_active_window(callback, stop_event, display_name=self._display_name,
+                                        ready=ready)
             except (XError, ConnectionClosedError, OSError) as e:
                 log.warning("Active-window watcher stopped: %s", e)
+            finally:
+                ready.set()
 
         thread = threading.Thread(target=run, name="active-window", daemon=True)
         thread.start()
+        ready.wait(timeout=2.0)
 
         def stop() -> None:
             stop_event.set()

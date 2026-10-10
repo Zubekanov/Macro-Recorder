@@ -364,6 +364,63 @@ def test_synthetic_keys_expire():
     assert not keys.is_held(9)
 
 
+def test_synthetic_keys_stay_bounded_during_long_playback():
+    clock = FakeClock()
+    keys = SyntheticKeys(ttl_s=2.0, clock=clock.now, limit=50)
+    for _ in range(10_000):
+        keys.press(38)
+        keys.release(38)
+        clock.advance(0.01)
+    assert keys.count(38) <= 50
+    assert len(keys._pending[38]) <= 50
+    clock.advance(5.0)
+    keys.press(38)
+    assert keys.count(38) == 1
+
+
+def test_synthetic_keys_drop_expired_notes_on_press():
+    clock = FakeClock()
+    keys = SyntheticKeys(ttl_s=2.0, clock=clock.now)
+    for _ in range(100):
+        keys.press(38)
+    clock.advance(3.0)
+    keys.press(38)
+    assert len(keys._pending[38]) == 1
+
+
+# ---------------------------------------------------------------- legacy keysyms
+
+@pytest.mark.parametrize("char, name", [
+    ("\u20ac", "EuroSign"), ("\u0430", "Cyrillic_a"), ("\u042f", "Cyrillic_YA"),
+    ("\u03b1", "Greek_alpha"), ("\u03c3", "Greek_sigma"), ("\u03c2", "Greek_finalsmallsigma"),
+    ("\u03a3", "Greek_SIGMA"), ("\u0104", "Aogonek"), ("\u0142", "lstroke"),
+    ("\u05d0", "hebrew_aleph"), ("\u0153", "oe"),
+])
+def test_legacy_keysyms_for_characters(char, name):
+    assert x11.legacy_keysym_for_char(char) == ks(name)
+    assert x11.keysyms_for_char(char) == [0x01000000 | ord(char), ks(name)]
+    assert x11.keysym_name(ks(name)) == name
+
+
+def test_latin1_and_ascii_have_no_legacy_keysym():
+    assert x11.keysyms_for_char("a") == [0x61]
+    assert x11.keysyms_for_char("\u00e9") == [0xE9]
+    assert x11.legacy_keysym_for_char("\u4e2d") is None
+
+
+def test_legacy_letters_have_legacy_cases():
+    assert x11.keysym_case(ks("Cyrillic_a")) == (ks("Cyrillic_a"), ks("Cyrillic_A"))
+    assert x11.keysym_case(ks("Greek_sigma")) == (ks("Greek_sigma"), ks("Greek_SIGMA"))
+    assert x11.keysym_case(ks("EuroSign")) is None
+
+
+def test_legacy_letter_pair_follows_caps_lock():
+    zhe, zhe_upper = ks("Cyrillic_zhe"), ks("Cyrillic_ZHE")
+    km = x11.KeyboardMap(8, [[zhe, zhe_upper]], [[]] * 8)
+    assert km.keysym_at(8, X.LockMask) == zhe_upper
+    assert km.keysym_at(8, X.LockMask | X.ShiftMask) == zhe
+
+
 # ---------------------------------------------------------------- hotkey rules
 
 @pytest.mark.parametrize("combo", ["ctrl+alt+F1", "ctrl+alt+F12", "ctrl+alt+BackSpace",
