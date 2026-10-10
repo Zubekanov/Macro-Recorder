@@ -1,7 +1,7 @@
 """The Details panel: the selected row's fields, generated from its ActionSpec.
 
-Enabled, Delay, Label and Comment are always at the top; below them is one
-widget per FieldSpec of ``spec.layout_for(row)``.  Every change commits only
+Enabled and Delay are always at the top; below them is one widget per
+FieldSpec of ``spec.layout_for(row)``.  Every change commits only
 the edited field's keys, inside the document's edit session for
 ``(row id, field key)``, so a run of keystrokes is one undo step.  The
 session ends on selection change, FocusOut of the panel, undo or redo
@@ -20,12 +20,12 @@ from tkinter import ttk
 from typing import Any, Callable, Mapping
 
 from macro_recorder.gui.fields import (
-    AMBER_COLOUR, INVALID_COLOUR, FieldContext, FieldError, FieldWidget, Parsed, TextField,
-    make_field,
+    AMBER_COLOUR, INVALID_COLOUR, FieldContext, FieldWidget, make_field, widget_inside,
 )
 from macro_recorder.gui.settings import Settings
+from macro_recorder.gui.targeting import Capture
 from macro_recorder.model.catalogue import FieldKind, FieldSpec, spec_for
-from macro_recorder.model.document import MacroDocument, Row, label_problem, rows_referencing
+from macro_recorder.model.document import MacroDocument, Row
 from macro_recorder.model.events import EventType
 from macro_recorder.model.protocols import Change, Mode, OverlayShape
 from macro_recorder.model.validate import names_assigned
@@ -33,11 +33,9 @@ from macro_recorder.model.validate import names_assigned
 ENABLED_SPEC = FieldSpec(keys=("enabled",), label="Enabled", kind=FieldKind.BOOL, default=True)
 DELAY_SPEC = FieldSpec(keys=("delay_ms",), label="Delay", kind=FieldKind.DURATION, default=0,
                        allow_expr=False, minimum=0, integer=True, help="Waited before the row plays")
-LABEL_SPEC = FieldSpec(keys=("label",), label="Label", kind=FieldKind.TEXT, default="")
-COMMENT_SPEC = FieldSpec(keys=("comment",), label="Comment", kind=FieldKind.TEXT, default="")
-ROW_SPECS = (ENABLED_SPEC, DELAY_SPEC, LABEL_SPEC, COMMENT_SPEC)
+ROW_SPECS = (ENABLED_SPEC, DELAY_SPEC)
 
-TargetingRequest = Callable[[tuple[str, ...], Callable[[dict], None]], None]
+TargetingRequest = Callable[[tuple[str, ...], Callable[[Capture], None]], None]
 KeyCaptureRequest = Callable[[bool, Callable[[str], None]], None]
 
 
@@ -47,27 +45,7 @@ KeyCaptureRequest = Callable[[bool, Callable[[str], None]], None]
 
 def row_values(row: Row) -> dict[str, Any]:
     """The row-level values the top of the panel edits."""
-    return {"enabled": row.enabled, "delay_ms": row.delay_ms, "label": row.label,
-            "comment": row.comment}
-
-
-def label_entry_problem(text: str, document: MacroDocument, row: Row) -> str | None:
-    """Why ``text`` cannot become ``row``'s label, or None.
-
-    Clearing a label that other rows jump to is refused: renaming rewrites
-    their targets, and a blank label would leave them with none.
-    """
-    problem = label_problem(text, document, row.id)
-    if problem is not None:
-        return problem
-    if text == "" and row.label:
-        users = [document.index_of(r.id) + 1 for r in rows_referencing(document.rows, row.label)
-                 if r.id != row.id]
-        if users:
-            return "Row%s %s jump%s to this label" % (
-                "s" if len(users) > 1 else "", ", ".join(map(str, users)),
-                "" if len(users) > 1 else "s")
-    return None
+    return {"enabled": row.enabled, "delay_ms": row.delay_ms}
 
 
 def targeting_steps(spec: FieldSpec) -> int:
@@ -85,12 +63,12 @@ def targeting_keys(spec: FieldSpec, step: int) -> tuple[str, ...]:
     return keys
 
 
-def targeting_values(spec: FieldSpec, capture: Mapping[str, Any], step: int) -> dict[str, Any]:
-    """Map one capture ``{'x', 'y', 'colour'}`` onto the keys of ``step``."""
+def targeting_values(spec: FieldSpec, capture: Capture, step: int) -> dict[str, Any]:
+    """Map one capture onto the keys of ``step``."""
     keys = targeting_keys(spec, step)
-    values: dict[str, Any] = {keys[0]: int(capture["x"]), keys[1]: int(capture["y"])}
+    values: dict[str, Any] = {keys[0]: int(capture.x), keys[1]: int(capture.y)}
     if "colour" in keys:
-        values["colour"] = str(capture["colour"]).lower()
+        values["colour"] = capture.colour.lower()
     return values
 
 
@@ -111,28 +89,12 @@ def panel_title(row: Row, number: int) -> str:
 # Widgets
 # ---------------------------------------------------------------------------
 
-class RowLabelField(TextField):
-    """The row's label: label rules plus the guard of :func:`label_entry_problem`."""
-
-    def __init__(self, master: tk.Misc, problem: Callable[[str], str | None],
-                 values: Mapping[str, Any], on_change: Callable[[str, dict], None],
-                 context: FieldContext) -> None:
-        self._problem = problem
-        super().__init__(master, LABEL_SPEC, values, on_change, context)
-
-    def parse(self) -> Parsed:
-        text = self.text().strip()
-        problem = self._problem(text)
-        if problem is not None:
-            raise FieldError(problem)
-        return Parsed({"label": text})
-
-
 class DetailsPanel(ttk.Frame):
     """Editor for one row of ``document``.
 
     ``request_targeting(keys, deliver)`` asks the shell for a screen capture
-    and ``deliver({'x', 'y', 'colour'})`` on the main thread.
+    and ``deliver(capture)`` with a :class:`~macro_recorder.gui.targeting.Capture`
+    on the main thread.
     ``request_key_capture(single, deliver)``, when given, adds Capture
     buttons to the key fields; without it they are typed only.
     """
@@ -269,12 +231,8 @@ class DetailsPanel(ttk.Frame):
         self._clear()
         top_values = row_values(row)
         for spec in ROW_SPECS:
-            if spec is LABEL_SPEC:
-                widget: FieldWidget = RowLabelField(self._top, self._label_problem, top_values,
-                                                    self._commit_row_field, self._context)
-            else:
-                widget = make_field(self._top, spec, top_values, self._commit_row_field,
-                                    self._context)
+            widget = make_field(self._top, spec, top_values, self._commit_row_field,
+                                self._context)
             self._add(widget, len(self._row_fields))
             self._row_fields.append(widget)
         if layout:
@@ -300,10 +258,6 @@ class DetailsPanel(ttk.Frame):
             else:
                 widget.frame.grid_remove()
             widget.set_enabled(not self._locked and field_enabled(spec, values))
-
-    def _label_problem(self, text: str) -> str | None:
-        row = self._row(self._row_id)
-        return None if row is None else label_entry_problem(text, self._document, row)
 
     # -------------------------------------------------------------- messages
 
@@ -358,11 +312,12 @@ class DetailsPanel(ttk.Frame):
     def _start_targeting(self, spec: FieldSpec) -> None:
         if self._row_id is None or not self._can_edit():
             return
+        self.revert_pending()
         self._document.end_edit()
         self._target_step(spec, self._row_id, 0, {})
 
     def _target_step(self, spec: FieldSpec, row_id: int, step: int, collected: dict) -> None:
-        def deliver(capture: dict) -> None:
+        def deliver(capture: Capture) -> None:
             row = self._row(row_id)
             if row is None or self._row_id != row_id or \
                     self._mode() not in (Mode.IDLE, Mode.TARGETING):
@@ -370,7 +325,8 @@ class DetailsPanel(ttk.Frame):
             values = dict(collected)
             values.update(targeting_values(spec, capture, step))
             if step + 1 < targeting_steps(spec):
-                self._target_step(spec, row_id, step + 1, values)
+                # Start the next capture once the shell has finished with this one.
+                self.after_idle(lambda: self._target_step(spec, row_id, step + 1, values))
                 return
             if spec.kind == FieldKind.REGION:
                 values[spec.keys[-1]] = None
@@ -397,8 +353,7 @@ class DetailsPanel(ttk.Frame):
             focused = self.focus_get()
         except (KeyError, tk.TclError):
             focused = None
-        path = str(focused) if focused is not None else ""
-        if path != str(self) and not path.startswith(str(self) + "."):
+        if not widget_inside(focused, self):
             self._document.end_edit()
 
     def _on_destroy(self, event: tk.Event) -> None:

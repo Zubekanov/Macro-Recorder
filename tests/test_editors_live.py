@@ -11,6 +11,7 @@ import pytest
 
 from macro_recorder.gui.details import DetailsPanel
 from macro_recorder.gui.settings import Settings
+from macro_recorder.gui.targeting import Capture
 from macro_recorder.model.catalogue import all_specs, make, spec_for
 from macro_recorder.model.document import MacroDocument, make_row
 from macro_recorder.model.protocols import Mode, OverlayShape
@@ -170,6 +171,43 @@ def test_coord_pair_validates_both_halves_together(root):
     assert (h.row(row).event["x"], h.row(row).event["y"]) == ("left", "top")
 
 
+def move_focus(root, source, target):
+    """Focus ``target`` and send ``source`` the FocusOut a click or Tab would."""
+    root.deiconify()
+    target.focus_force()
+    root.update()
+    source.event_generate("<FocusOut>")
+    root.update()
+
+
+def test_moving_between_pair_entries_keeps_red_text(root):
+    row = make_row(make("mouse_scroll"))
+    h = Harness(root, [row])
+    h.show(row)
+    widget = h.widget("x")
+    x_entry, y_entry = widget.inputs[0], widget.inputs[1]
+    h.type("x", "500")
+    assert widget.state == "invalid"
+    move_focus(root, x_entry, y_entry)
+    assert widget.text(0) == "500"
+    h.type("y", "300", index=1)
+    assert (h.row(row).event["x"], h.row(row).event["y"]) == (500, 300)
+    h.type("x", "")
+    move_focus(root, x_entry, y_entry)
+    h.type("y", "", index=1)
+    assert (h.row(row).event["x"], h.row(row).event["y"]) == (None, None)
+
+
+def test_leaving_the_field_reverts_red_text(root):
+    row = make_row(make("mouse_click", x=10, y=20))
+    h = Harness(root, [row])
+    h.show(row)
+    widget = h.widget("x")
+    h.type("x", "left")
+    move_focus(root, widget.inputs[0], h.widget("delay_ms").inputs[0])
+    assert widget.text(0) == "10" and widget.state == "ok"
+
+
 def test_undo_reverts_red_text(root):
     row = make_row(make("wait", duration_ms=500))
     h = Harness(root, [row])
@@ -214,21 +252,13 @@ def test_enabled_when_disables_the_widget(root):
 
 def test_row_fields(root):
     target = make_row(make("wait"), label="top")
-    jumper = make_row(make("goto", target="top"))
-    h = Harness(root, [target, jumper])
+    h = Harness(root, [target])
     h.show(target)
     h.type("enabled", "0")
     assert not h.row(target).enabled
     h.type("delay_ms", "40")
     assert h.row(target).delay_ms == 40
-    h.type("comment", "note")
-    assert h.row(target).comment == "note"
-    h.type("label", "begin")
-    assert h.row(target).label == "begin"
-    assert h.row(jumper).event["target"] == "begin"
-    h.type("label", "")
-    assert h.widget("label").state == "invalid"
-    assert h.row(target).label == "begin"
+    assert [w.spec.keys for w in h.panel._row_fields] == [("enabled",), ("delay_ms",)]
 
 
 def test_label_target_lists_labels_and_shows_a_missing_one_red(root):
@@ -286,7 +316,7 @@ def test_targeting_fills_position_and_colour_in_one_step(root):
     pick.invoke()
     keys, deliver = h.requests[-1]
     assert keys == ("x", "y", "colour")
-    deliver({"x": 5, "y": 6, "colour": "#ABCDEF"})
+    deliver(Capture(5, 6, "#ABCDEF"))
     event = h.row(row).event
     assert (event["x"], event["y"], event["colour"]) == (5, 6, "#abcdef")
     h.document.undo()
@@ -300,12 +330,23 @@ def test_region_targeting_takes_two_captures(root):
     h.panel._context.request_targeting(h.widget("x").spec)
     keys, deliver = h.requests[-1]
     assert keys == ("x", "y")
-    deliver({"x": 10, "y": 20, "colour": "#000000"})
+    deliver(Capture(10, 20, "#000000"))
+    assert len(h.requests) == 1
+    root.update()
     keys, deliver = h.requests[-1]
     assert keys == ("x2", "y2")
-    deliver({"x": 300, "y": 200, "colour": "#000000"})
+    deliver(Capture(300, 200, "#000000"))
     event = h.row(row).event
     assert (event["x"], event["y"], event["x2"], event["y2"], event["monitor"]) == (10, 20, 300, 200, None)
+
+
+def test_targeting_reverts_red_text(root):
+    row = make_row(make("wait_pixel", x=1, y=1))
+    h = Harness(root, [row])
+    h.show(row)
+    h.type("timeout_ms", "1 +")
+    h.panel._context.request_targeting(h.widget("x").spec)
+    assert h.widget("timeout_ms").state != "invalid"
 
 
 def test_locked_panel_disables_and_refuses_edits(root):

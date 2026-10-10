@@ -9,8 +9,9 @@ import pytest
 from macro_recorder.gui import details
 from macro_recorder.gui import fields as f
 from macro_recorder.gui.fields import FieldError
+from macro_recorder.gui.targeting import Capture
 from macro_recorder.model.catalogue import FieldKind, FieldSpec, make, spec
-from macro_recorder.model.document import MacroDocument, make_row
+from macro_recorder.model.document import make_row
 
 
 def field(type_: str, key: str) -> FieldSpec:
@@ -106,40 +107,38 @@ def test_path_start_takes_numbers_only():
 
 # ------------------------------------------------------------------ regions
 
-SCREEN = (1920, 1080)
-
-
 def test_region_mode_detection():
-    assert f.region_mode({"x": 1, "y": 2, "x2": 3, "y2": 4, "monitor": None}, SCREEN) == f.REGION_RECTANGLE
-    assert f.region_mode({"x": 1, "y": 2, "x2": 3, "y2": 4, "monitor": 2}, SCREEN) == f.REGION_MONITOR
-    assert f.region_mode({"x": 0, "y": 0, "x2": 1920, "y2": 1080, "monitor": None}, SCREEN) == f.REGION_SCREEN
+    region = field("ocr_read", "x")
+    assert f.REGION_MODES == (f.REGION_RECTANGLE, f.REGION_MONITOR)
+    assert f.region_mode({"x": 1, "y": 2, "x2": 3, "y2": 4, "monitor": None}, region) == f.REGION_RECTANGLE
+    assert f.region_mode({"x": 1, "y": 2, "x2": 3, "y2": 4, "monitor": 2}, region) == f.REGION_MONITOR
+    assert f.region_mode({"x": 0, "y": 0, "x2": 1920, "y2": 1080, "monitor": None}, region) == \
+        f.REGION_RECTANGLE
 
 
 def test_region_rectangle():
     region = field("ocr_read", "x")
     current = {"x": 1, "y": 2, "x2": 3, "y2": 4, "monitor": 1}
-    parsed = f.parse_region(f.REGION_RECTANGLE, ("10", "20", "w", "40"), "1", region, SCREEN, current)
+    parsed = f.parse_region(f.REGION_RECTANGLE, ("10", "20", "w", "40"), "1", region, current)
     assert parsed.values == {"x": 10, "y": 20, "x2": "w", "y2": 40, "monitor": None}
     assert parsed.names == frozenset({"w"})
     with pytest.raises(FieldError, match="needs a value"):
-        f.parse_region(f.REGION_RECTANGLE, ("10", "", "30", "40"), "1", region, SCREEN, current)
+        f.parse_region(f.REGION_RECTANGLE, ("10", "", "30", "40"), "1", region, current)
 
 
 def test_region_monitor_keeps_corners():
     region = field("ocr_read", "x")
     current = {"x": 1, "y": 2, "x2": 3, "y2": 4, "monitor": None}
-    parsed = f.parse_region(f.REGION_MONITOR, ("", "", "", ""), "2", region, SCREEN, current)
+    parsed = f.parse_region(f.REGION_MONITOR, ("", "", "", ""), "2", region, current)
     assert parsed.values == {"x": 1, "y": 2, "x2": 3, "y2": 4, "monitor": 2}
     for bad in ("0", "", "x", "-1"):
         with pytest.raises(FieldError, match="start at 1"):
-            f.parse_region(f.REGION_MONITOR, ("", "", "", ""), bad, region, SCREEN, current)
+            f.parse_region(f.REGION_MONITOR, ("", "", "", ""), bad, region, current)
 
 
-def test_region_whole_screen():
-    region = field("ocr_read", "x")
-    parsed = f.parse_region(f.REGION_SCREEN, ("", "", "", ""), "", region, SCREEN, {})
-    assert parsed.values == {"x": 0, "y": 0, "x2": 1920, "y2": 1080, "monitor": None}
-    assert f.region_mode(parsed.values, SCREEN) == f.REGION_SCREEN
+def test_region_rejects_an_unknown_mode():
+    with pytest.raises(FieldError, match="Unknown region mode"):
+        f.parse_region("Ellipse", ("", "", "", ""), "", field("ocr_read", "x"), {})
 
 
 # ------------------------------------------------------------------ text kinds
@@ -229,6 +228,27 @@ def test_keys():
         f.parse_key_field("a+b", combo)
 
 
+def test_keys_must_be_known_keysyms():
+    combo = field("key_combo", "keys")
+    key = field("key_press", "key")
+    assert f.parse_key_field("XF86AudioMute", key).values == {"key": "XF86AudioMute"}
+    assert f.parse_key_field("super+Left", combo).values == {"keys": "super+Left"}
+    with pytest.raises(FieldError, match="unknown key 'Retrun'"):
+        f.parse_key_field("Retrun", key)
+    with pytest.raises(FieldError, match="unknown key 'Fx'"):
+        f.parse_key_field("ctrl+Fx", combo)
+
+
+def test_focus_paths():
+    assert f.path_inside(".panel.f1.e0", ".panel.f1")
+    assert f.path_inside(".panel.f1", ".panel.f1")
+    assert not f.path_inside(".panel.f10", ".panel.f1")
+    assert not f.path_inside(".table", ".panel.f1")
+    assert f.path_inside(".anything", ".")
+    assert not f.widget_inside(None, ".panel")
+    assert f.widget_inside(".panel.x", ".panel")
+
+
 # ------------------------------------------------------------------ label targets
 
 def test_label_target_choices_in_row_order():
@@ -299,30 +319,18 @@ def test_every_field_kind_has_a_widget_class():
 
 def test_row_values():
     row = make_row(make("wait"), label="a", comment="c", enabled=False, delay_ms=40)
-    assert details.row_values(row) == {"enabled": False, "delay_ms": 40, "label": "a", "comment": "c"}
-
-
-def test_label_entry_problem():
-    target = make_row(make("wait"), label="top")
-    jumper = make_row(make("goto", target="top"))
-    other = make_row(make("wait"))
-    doc = MacroDocument([target, jumper, other])
-    assert details.label_entry_problem("top", doc, target) is None
-    assert details.label_entry_problem("renamed", doc, target) is None
-    assert details.label_entry_problem("", doc, target) == "Row 2 jumps to this label"
-    assert "already used" in details.label_entry_problem("TOP", doc, other)
-    assert "reserved" in details.label_entry_problem("End", doc, other)
-    assert details.label_entry_problem("", doc, other) is None
+    assert details.row_values(row) == {"enabled": False, "delay_ms": 40}
+    assert [s.keys for s in details.ROW_SPECS] == [("enabled",), ("delay_ms",)]
 
 
 def test_targeting_coord_pair_with_colour():
     pixel = field("wait_pixel", "x")
     assert details.targeting_steps(pixel) == 1
     assert details.targeting_keys(pixel, 0) == ("x", "y", "colour")
-    assert details.targeting_values(pixel, {"x": 5, "y": 6, "colour": "#ABCDEF"}, 0) == \
+    assert details.targeting_values(pixel, Capture(5, 6, "#ABCDEF"), 0) == \
         {"x": 5, "y": 6, "colour": "#abcdef"}
     to = field("mouse_move_timed", "x2")
-    assert details.targeting_values(to, {"x": 5, "y": 6, "colour": "#000000"}, 0) == {"x2": 5, "y2": 6}
+    assert details.targeting_values(to, Capture(5, 6, "#000000"), 0) == {"x2": 5, "y2": 6}
 
 
 def test_targeting_region_takes_two_captures():
@@ -330,7 +338,7 @@ def test_targeting_region_takes_two_captures():
     assert details.targeting_steps(region) == 2
     assert details.targeting_keys(region, 0) == ("x", "y")
     assert details.targeting_keys(region, 1) == ("x2", "y2")
-    assert details.targeting_values(region, {"x": 9, "y": 8, "colour": "#000000"}, 1) == {"x2": 9, "y2": 8}
+    assert details.targeting_values(region, Capture(9, 8, "#000000"), 1) == {"x2": 9, "y2": 8}
 
 
 def test_visibility_and_enablement():

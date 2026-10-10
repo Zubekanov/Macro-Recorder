@@ -10,7 +10,9 @@ A widget's StringVars are traced on write and the trace is suppressed while
 the widget populates itself.  A change parses only that field; when it
 parses and the values differ from the last known ones the widget calls
 ``on_change(spec.key, values)`` once.  Text that does not parse turns red
-and stays uncommitted until :meth:`FieldWidget.revert`.  An expression that
+and stays uncommitted until :meth:`FieldWidget.revert`, which also runs
+when focus leaves the field (not when it moves between the field's own
+inputs).  An expression that
 reads a variable nothing in the document assigns turns amber and is still
 committed.
 """
@@ -35,14 +37,14 @@ from macro_recorder.model.catalogue import END_TARGET, START_TARGET, FieldKind, 
 from macro_recorder.model.fileformat import MAX_MAGNITUDE
 from macro_recorder.model.keys import combo_from_names, parse_combo
 from macro_recorder.model.validate import EXPRESSION_TEXT_FIELDS, TEMPLATE_COMMAND_FIELDS
+from macro_recorder.platform.x11 import keysym_from_name
 
 # A plain decimal number; any other text is an expression.
 _NUMBER_RE = re.compile(r"^[+-]?(\d+(\.\d*)?|\.\d+)$")
 
 REGION_RECTANGLE = "Rectangle"
 REGION_MONITOR = "Monitor"
-REGION_SCREEN = "Whole screen"
-REGION_MODES = (REGION_RECTANGLE, REGION_MONITOR, REGION_SCREEN)
+REGION_MODES = (REGION_RECTANGLE, REGION_MONITOR)
 MAX_MONITOR = 16
 
 
@@ -158,23 +160,16 @@ def parse_pair(x_text: str, y_text: str, spec: FieldSpec) -> Parsed:
     return Parsed({x_key: x, y_key: y}, _names_of(x) | _names_of(y))
 
 
-def region_mode(values: Mapping[str, Any], screen_size: tuple[int, int]) -> str:
-    """Which REGION mode the five values show."""
-    if values.get("monitor") is not None:
-        return REGION_MONITOR
-    corners = tuple(values.get(k) for k in ("x", "y", "x2", "y2"))
-    if corners == (0, 0, screen_size[0], screen_size[1]):
-        return REGION_SCREEN
-    return REGION_RECTANGLE
+def region_mode(values: Mapping[str, Any], spec: FieldSpec) -> str:
+    """Which REGION mode the five values show: Monitor when a monitor is set."""
+    return REGION_MONITOR if values.get(spec.keys[-1]) is not None else REGION_RECTANGLE
 
 
 def parse_region(mode: str, corner_texts: tuple[str, str, str, str], monitor_text: str,
-                 spec: FieldSpec, screen_size: tuple[int, int],
-                 current: Mapping[str, Any]) -> Parsed:
-    """REGION: corners from the entries, a monitor number, or the whole screen.
+                 spec: FieldSpec, current: Mapping[str, Any]) -> Parsed:
+    """REGION: corners from the entries, or a monitor number.
 
-    The model has no whole-screen value, so Whole screen writes corners that
-    span the screen.  In Monitor mode the corners keep their current values.
+    In Monitor mode the corners keep their current values.
     """
     *corner_keys, monitor_key = spec.keys
     if mode == REGION_MONITOR:
@@ -183,10 +178,6 @@ def parse_region(mode: str, corner_texts: tuple[str, str, str, str], monitor_tex
             raise FieldError("Monitor numbers start at 1")
         values = {k: current.get(k) for k in corner_keys}
         values[monitor_key] = int(text)
-        return Parsed(values)
-    if mode == REGION_SCREEN:
-        values = dict(zip(corner_keys, (0, 0, screen_size[0], screen_size[1])))
-        values[monitor_key] = None
         return Parsed(values)
     if mode != REGION_RECTANGLE:
         raise FieldError("Unknown region mode %r" % mode)
@@ -292,11 +283,18 @@ def parse_var_name(text: str, spec: FieldSpec) -> Parsed:
 
 
 def parse_key_field(text: str, spec: FieldSpec) -> Parsed:
-    """KEY (one keysym name) or KEY_COMBO (stored as ``ctrl+shift+s``)."""
+    """KEY (one keysym name) or KEY_COMBO (stored as ``ctrl+shift+s``).
+
+    Every name must be a known X keysym, so a typo is red here rather than
+    an error at playback.
+    """
     try:
         names = parse_combo(text)
     except ValueError as e:
         raise FieldError(str(e)) from None
+    unknown = [name for name in names if not keysym_from_name(name)]
+    if unknown:
+        raise FieldError("%s: unknown key %s" % (spec.label, ", ".join(map(repr, unknown))))
     if spec.kind == FieldKind.KEY:
         if len(names) != 1:
             raise FieldError("%s takes one key, not a combination" % spec.label)
@@ -347,6 +345,16 @@ def format_info(value: Any) -> str:
         left, top, width, height = (format_number(v) for v in value)
         return "%s, %s, %s x %s" % (left, top, width, height)
     return str(value)
+
+
+def path_inside(path: str, container: str) -> bool:
+    """True when Tk path ``path`` is ``container`` or one of its descendants."""
+    return path == container or path.startswith(container.rstrip(".") + ".")
+
+
+def widget_inside(widget: Any, container: Any) -> bool:
+    """True when ``widget`` (None for no focus) is ``container`` or inside it."""
+    return widget is not None and path_inside(str(widget), str(container))
 
 
 def field_label(spec: FieldSpec) -> str:
@@ -422,7 +430,7 @@ class FieldWidget:
         body.grid(row=0, column=1, sticky="ew", pady=2)
         self.build(body)
         for widget in self.inputs:
-            widget.bind("<FocusOut>", lambda _e: self.revert(), add="+")
+            widget.bind("<FocusOut>", self._on_focus_out, add="+")
         self._populate(self._values)
 
     # --------------------------------------------------------- subclass API
@@ -507,6 +515,24 @@ class FieldWidget:
             self._populate(self._values)
 
     # ------------------------------------------------------------ internals
+
+    def _on_focus_out(self, _event: tk.Event) -> None:
+        """Revert once focus has settled outside the field.
+
+        Moving between the inputs of one field (x to y of a pair) keeps the
+        text, so a pair can pass through a red state while it is retyped.
+        """
+        self.frame.after_idle(self._revert_if_focus_left)
+
+    def _revert_if_focus_left(self) -> None:
+        try:
+            if not self.frame.winfo_exists():
+                return
+            focused = self.frame.focus_get()
+        except (KeyError, tk.TclError):
+            focused = None
+        if not widget_inside(focused, self.frame):
+            self.revert()
 
     def _populate(self, values: Mapping[str, Any]) -> None:
         self._populating = True
@@ -628,13 +654,10 @@ class RegionField(FieldWidget):
                                     width=5)
         self.inputs.append(self._monitor)
 
-    def screen_size(self) -> tuple[int, int]:
-        return self.frame.winfo_screenwidth(), self.frame.winfo_screenheight()
-
     def texts(self, values: Mapping[str, Any]) -> list[str]:
         *corner_keys, monitor_key = self.spec.keys
         monitor = values.get(monitor_key)
-        return ([region_mode(values, self.screen_size())]
+        return ([region_mode(values, self.spec)]
                 + [format_number(values.get(k)) for k in corner_keys]
                 + [str(monitor if monitor is not None else 1)])
 
@@ -648,8 +671,7 @@ class RegionField(FieldWidget):
 
     def parse(self) -> Parsed:
         corners = (self.text(1), self.text(2), self.text(3), self.text(4))
-        return parse_region(self.text(0), corners, self.text(5), self.spec,
-                            self.screen_size(), self._values)
+        return parse_region(self.text(0), corners, self.text(5), self.spec, self._values)
 
     def after_evaluate(self, parsed: Parsed | None) -> None:
         mode = self.text(0)
