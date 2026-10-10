@@ -203,14 +203,14 @@ once:
   "filter": ["mouse_move"],
   "path_mode": "recorded",
   "rows": [
-    {"label": "start",
+    {"label": "top",
      "events": [{"type": "window_focus", "window": "xed", "match_mode": "substring",
                  "rect": [100, 80, 900, 600], "client_rect": [100, 110, 900, 570]}]},
     {"delay_ms": 60,
      "events": [{"type": "mouse_click", "x": 240, "y": 300, "button": "left"}]},
     {"enabled": false, "breakpoint": true, "comment": "skip for now",
      "events": [{"type": "wait_pixel", "x": 10, "y": 10, "colour": "#ff0000",
-                 "timeout_ms": 5000, "on_timeout": "goto", "target": "start"}]},
+                 "timeout_ms": 5000, "on_timeout": "goto", "target": "top"}]},
     {"events": [{"type": "mouse_move", "x": 1, "y": 2},
                 {"type": "mouse_move", "x": 5, "y": 9, "dt": 0.012}]}
   ]

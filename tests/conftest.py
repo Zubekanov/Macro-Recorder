@@ -126,6 +126,9 @@ class FakeInput:
         self.held_buttons.clear()
         self.held_keys.clear()
 
+    def close(self):
+        self.release_all()
+
 
 class FakeListener:
     """Delivers the RawEvents a test feeds it."""
@@ -144,6 +147,9 @@ class FakeListener:
     def is_alive(self):
         return self.alive
 
+    def close(self):
+        self.alive = False
+
     def feed(self, *events: RawEvent):
         assert self._callback is not None, "listener not started"
         for e in events:
@@ -160,6 +166,9 @@ class FakeStopKey:
 
     def stop(self):
         self.key, self._callback = None, None
+
+    def close(self):
+        self.stop()
 
     def press(self):
         if self._callback:
@@ -186,6 +195,10 @@ class FakeHotkeys:
 
     def resume(self):
         self.suspended = False
+        return []
+
+    def close(self):
+        self.grabbed.clear()
 
     def press(self, combo):
         if not self.suspended and combo in self.grabbed:

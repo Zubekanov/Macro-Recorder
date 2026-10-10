@@ -140,7 +140,9 @@ def display_key(name: str) -> str:
 
 def combo_from_names(names: tuple[str, ...]) -> str:
     """Canonical stored form: ``ctrl+shift+s``."""
-    aliases = {v: k for k, v in MODIFIER_ALIASES.items()}
+    aliases: dict[str, str] = {}
+    for alias, keysym in MODIFIER_ALIASES.items():
+        aliases.setdefault(keysym, alias)          # the first alias listed wins
     aliases.update({"Control_R": "ctrl", "Shift_R": "shift", "Alt_R": "alt",
                     "Super_R": "super", "Meta_R": "meta"})
     parts = [aliases.get(n, n) for n in names[:-1]] + [names[-1]]

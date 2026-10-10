@@ -104,7 +104,7 @@ class Jump:
 
 @dataclass(frozen=True)
 class Abort:
-    message: str
+    message: str        # without the "Row N: " prefix; the engine adds it
 
 
 START_TARGET = "Start"

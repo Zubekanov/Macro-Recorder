@@ -7,3 +7,4 @@ dist/
 *.egg-info/
 recording_*.json
 *.log
+.claude/

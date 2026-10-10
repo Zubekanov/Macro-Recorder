@@ -20,7 +20,6 @@ from typing import Any, Iterator, Mapping
 import pytest
 
 from macro_recorder.model import catalogue
-from macro_recorder.model.actions import find
 from macro_recorder.model.actions.variables import DYNAMIC_NAMES
 from macro_recorder.model.catalogue import Flow
 from macro_recorder.model.document import Row, make_row
@@ -238,6 +237,9 @@ class FakePlayContext:
     def row_state(self, row_id: int) -> dict:
         return self.states.setdefault(row_id, {})
 
+    def now(self) -> float:
+        return self.clock.now()
+
     def run_command(self, command: str, wait: bool, timeout_ms: float = 0) -> int | None:
         self.commands.append((command, wait, timeout_ms))
         if self.launch_error is not None:
@@ -260,6 +262,4 @@ def ctx(monkeypatch) -> FakePlayContext:
     module = _evaluator_module()
     if module is not None:
         monkeypatch.setitem(sys.modules, "macro_recorder.engine.expressions", module)
-    context = FakePlayContext()
-    monkeypatch.setattr(find, "_monotonic", context.clock.now)
-    return context
+    return FakePlayContext()

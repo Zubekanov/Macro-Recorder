@@ -8,7 +8,17 @@ fake for every Protocol.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Callable, Mapping, Protocol, Sequence
+
+
+class Mode(str, Enum):
+    """Application modes; every user command declares the modes it is enabled in."""
+    IDLE = "idle"
+    TARGETING = "targeting"
+    RECORDING = "recording"
+    PLAYING = "playing"
+    PAUSED = "paused"
 
 
 # ---------------------------------------------------------------------------
@@ -83,7 +93,8 @@ class RawEvent:
 class WindowManager(Protocol):
     def list(self) -> list[WindowInfo]: ...
     def active(self) -> WindowInfo | None: ...
-    def find(self, pattern: str, mode: str = "substring") -> WindowInfo | None: ...
+    def find(self, pattern: str, mode: str = "substring") -> WindowInfo | None:
+        """First match by title; an exact title wins.  Raises ValueError for a bad regex."""
     def refresh(self, window: WindowInfo) -> WindowInfo | None:
         """Re-read a window; None when it is gone."""
     def activate(self, window: WindowInfo, settle_ms: int = 1000) -> WindowInfo | None:
@@ -92,7 +103,8 @@ class WindowManager(Protocol):
         """Place the outer frame at rect; returns the settled window or None."""
     def set_maximised(self, window: WindowInfo, maximised: bool, settle_ms: int = 1000) -> WindowInfo | None: ...
     def watch_active(self, callback: Callable[[WindowInfo], None]) -> Callable[[], None]:
-        """Report every active-window change until the returned function is called."""
+        """Report every active-window change (not the window active at the start)
+        until the returned function is called."""
     def monitors(self) -> list[Monitor]: ...
     def bell(self) -> None: ...
     def screen_size(self) -> tuple[int, int]: ...
@@ -113,6 +125,7 @@ class InputBackend(Protocol):
     def type_char(self, char: str) -> None:
         """Press and release whatever keys produce ``char`` in the current keymap."""
     def release_all(self) -> None: ...
+    def close(self) -> None: ...
 
 
 class InputListener(Protocol):
@@ -121,20 +134,25 @@ class InputListener(Protocol):
         """Start delivering events on a background thread; returns once live."""
     def stop(self) -> None: ...
     def is_alive(self) -> bool: ...
+    def close(self) -> None: ...
 
 
 class StopKeyWatcher(Protocol):
     def start(self, key: str, callback: Callable[[], None]) -> None:
         """Call ``callback`` when the user (not the injector) presses ``key``."""
     def stop(self) -> None: ...
+    def close(self) -> None: ...
 
 
 class HotkeyGrabber(Protocol):
     def grab(self, combo: str, callback: Callable[[], None]) -> bool:
         """Grab a combo globally; False if the X server refuses."""
     def ungrab_all(self) -> None: ...
-    def suspend(self) -> None: ...
-    def resume(self) -> None: ...
+    def suspend(self) -> None:
+        """Release every grab, remembering the combos (for the Settings dialog)."""
+    def resume(self) -> list[str]:
+        """Re-grab the remembered combos; returns the ones the server refused."""
+    def close(self) -> None: ...
 
 
 class Screen(Protocol):
@@ -190,10 +208,15 @@ class PlayContext(Protocol):
     def render(self, template: str) -> str: ...
     def sleep(self, ms: float, scaled: bool = True) -> bool:
         """Wait; True when playback was stopped meanwhile."""
+    def now(self) -> float:
+        """Monotonic seconds on the engine's clock, unaffected by speed."""
     def stopped(self) -> bool: ...
     def log(self, text: str) -> None: ...
-    def hold_key(self, name: str) -> None: ...
-    def unhold_key(self, name: str) -> None: ...
+    def hold_key(self, name: str) -> None:
+        """Reference-counted press: presses on the first hold of a name and records
+        it, so a stop or pause releases it and a resume presses it again."""
+    def unhold_key(self, name: str) -> None:
+        """Drop one hold; releases on the last one (or at once when not held)."""
     def hold_button(self, name: str) -> None: ...
     def unhold_button(self, name: str) -> None: ...
     def reactivate_context(self) -> None:
@@ -210,12 +233,16 @@ class PlayContext(Protocol):
         With ``dts`` (seconds per point) under path mode ``recorded`` the points
         replay with their timing; otherwise the engine draws the document's
         path mode from the current pointer to the last point over
-        ``duration_ms``.  Returns True when playback was stopped meanwhile.
+        ``duration_ms``.  Actions pass unscaled times; the engine applies
+        1/speed.  Returns True when playback was stopped meanwhile.
         """
     def row_state(self, row_id: int) -> dict:
-        """Mutable per-row state (repeat counters); cleared at each program pass."""
+        """Mutable per-row state, cleared at each program pass.  A repeat row
+        keeps ``counter`` (passes so far) and ``count`` (the resolved total)."""
     def run_command(self, command: str, wait: bool, timeout_ms: float = 0) -> int | None:
-        """Run a shell command (see exec_program).  Exit code when waited for."""
+        """Run a shell command (see exec_program).  Raises OSError when it cannot
+        start.  Exit code when waited for; None when the wait timed out or
+        playback stopped."""
 
 
 # ---------------------------------------------------------------------------

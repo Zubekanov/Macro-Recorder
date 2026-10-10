@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -21,10 +20,6 @@ from macro_recorder.model.protocols import PlayContext
 IMAGE_TYPES = (("Images", "*.png *.jpg *.jpeg *.bmp"), ("All files", "*"))
 
 POLL_MS = 300
-
-# Wall clock for poll deadlines; tests replace it with a fake clock.
-_monotonic: Callable[[], float] = time.monotonic
-
 
 def text_similarity(a: str, b: str) -> float:
     """Normalised Levenshtein similarity, 0 to 1 (1 = identical).
@@ -53,12 +48,12 @@ def _poll(ctx: PlayContext, timeout_ms: float, probe: Callable[[], Any]) -> tupl
     Returns (result or None, stopped).  The timeout and poll interval are
     not scaled by speed.
     """
-    deadline = _monotonic() + timeout_ms / 1000.0
+    deadline = ctx.now() + timeout_ms / 1000.0
     while True:
         result = probe()
         if result is not None:
             return result, False
-        remaining_ms = (deadline - _monotonic()) * 1000.0
+        remaining_ms = (deadline - ctx.now()) * 1000.0
         if remaining_ms <= 0:
             return None, False
         if ctx.sleep(min(POLL_MS, remaining_ms), scaled=False):
