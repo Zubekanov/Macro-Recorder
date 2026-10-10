@@ -239,6 +239,21 @@ def test_keys_must_be_known_keysyms():
         f.parse_key_field("ctrl+Fx", combo)
 
 
+def test_combos_show_the_display_form_when_it_parses_back():
+    combo = field("key_combo", "keys")
+    key = field("key_press", "key")
+    for stored, shown in (("ctrl+End", "Ctrl+End"), ("ctrl+s", "Ctrl+S"),
+                          ("ctrl+Page_Down", "Ctrl+Page Down"), ("ctrl+comma", "Ctrl+,"),
+                          ("ctrl+shift+plus", "Ctrl+Shift++")):
+        assert f.format_key_field(stored, combo) == shown
+        assert f.parse_key_field(shown, combo).values == {"keys": stored}
+    assert f.format_key_field("ctrl+S", combo) == "ctrl+S"      # would come back as ctrl+s
+    assert f.format_key_field("Page_Down", key) == "Page_Down"
+    assert f.format_key_field(None, combo) == ""
+    assert f.parse_key_field("Ctrl+Shift+S", combo).values == {"keys": "ctrl+shift+s"}
+    assert f.parse_key_field("A", key).values == {"key": "A"}
+
+
 def test_focus_paths():
     assert f.path_inside(".panel.f1.e0", ".panel.f1")
     assert f.path_inside(".panel.f1", ".panel.f1")

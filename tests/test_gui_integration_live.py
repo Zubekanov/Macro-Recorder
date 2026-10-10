@@ -12,7 +12,7 @@ tk = pytest.importorskip("tkinter")
 
 from macro_recorder.gui import settings as settings_module
 from macro_recorder.gui.details import DetailsPanel
-from macro_recorder.gui.main_window import MainWindow
+from macro_recorder.gui.main_window import DETAILS_WIDTH, MainWindow
 from macro_recorder.gui.playback import Platform, PlatformFactories
 from macro_recorder.gui.settings import Settings, SettingsDialog, open_settings_dialog
 from macro_recorder.gui.targeting import Capture
@@ -36,8 +36,7 @@ class Rig(Shell):
         self.saved = saved
 
 
-@pytest.fixture
-def rig():
+def make_rig(settings: Settings) -> Rig:
     try:
         root = tk.Tk(className="macro-recorder")
     except tk.TclError as e:
@@ -49,14 +48,20 @@ def rig():
                                   grabber=lambda: grabber)
     saved: list[Settings] = []
     own = OwnWindows()
-    window = MainWindow(root, Settings(), own_windows=own, platform=Platform(factories),
+    window = MainWindow(root, settings, own_windows=own, platform=Platform(factories),
                         save_settings=lambda s: saved.append(settings_module.copy_settings(s)))
     window.start_hotkeys()
     shell = Rig(window, own, grabber, saved)
     root.update()
+    return shell
+
+
+@pytest.fixture
+def rig():
+    shell = make_rig(Settings())
     yield shell
-    if not window._closing:
-        window.close()
+    if not shell.window._closing:
+        shell.window.close()
 
 
 def select(rig: Rig, row_id: int) -> None:
@@ -153,6 +158,26 @@ def test_region_pick_runs_a_second_targeting_session(rig):
     assert w.document.row(row_id).event["x"] == 1
 
 
+def test_details_sash_is_placed_once_even_on_a_narrow_window():
+    settings = Settings()
+    settings.ui.geometry = "700x500"
+    shell = make_rig(settings)
+    w = shell.window
+    try:
+        show(shell)
+        shell.run_until(lambda: w._sash_binding is None)
+        width = w.upper_pane.winfo_width()
+        assert abs(w.upper_pane.sashpos(0) - width // 2) <= 8
+        w.upper_pane.sashpos(0, 250)
+        w.root.geometry("1400x700")
+        w.root.update()
+        shell.run_until(lambda: w.upper_pane.winfo_width() > 1000)
+        # The panes share the extra width by weight; the sash is not reset to width - 400.
+        assert w.upper_pane.sashpos(0) < w.upper_pane.winfo_width() - DETAILS_WIDTH - 100
+    finally:
+        w.close()
+
+
 def test_key_combo_capture_suspends_the_hotkeys(rig):
     w = rig.window
     (row_id,) = w.document.append([make_row(make("key_combo", keys="a"))])
@@ -170,6 +195,7 @@ def test_key_combo_capture_suspends_the_hotkeys(rig):
     assert seen == [(False, True)]
     assert not rig.grabber.suspended
     assert w.document.row(row_id).event["keys"] == "ctrl+shift+s"
+    assert field(w.details, "keys").text() == "Ctrl+Shift+S"
 
 
 def test_key_capture_dialog_reads_one_key_press(rig):
@@ -215,6 +241,29 @@ def test_overlay_follows_the_selection_and_hides_while_recording_and_playing(rig
     rig.run_until(lambda: w.mode is Mode.IDLE)
     w.root.update()
     assert overlay._visible
+
+
+def test_overlay_stays_hidden_while_another_application_has_the_focus(rig):
+    show(rig)
+    w = rig.window
+    (click_id,) = w.document.append([make_row(make("mouse_click", x=200, y=150))])
+    w.document.append([wait_row(1)])
+    select(rig, click_id)
+    overlay = w._overlay
+    assert overlay._visible
+    other = tk.Tk()             # a separate Tk application stands in for the target
+    try:
+        other.geometry("200x100+900+600")
+        other.update()
+        assert w.commands.run("play.play")
+        other.focus_force()
+        rig.run_until(lambda: w.mode is Mode.IDLE and w.root.focus_get() is None)
+        w.root.update()
+        assert not overlay._visible
+        w.table.tree.focus_force()
+        rig.run_until(lambda: overlay._visible)
+    finally:
+        other.destroy()
 
 
 def test_breakpoint_cleared_while_paused_applies_to_the_running_playback(rig):
@@ -352,6 +401,35 @@ def test_settings_reports_a_refused_grab_and_a_second_ok_keeps_it(rig):
     assert open_dialog(rig, act)
     assert "Record or stop: Ctrl+Alt+K is in use by another application" in messages[0]
     assert rig.window.settings.hotkeys.record == "ctrl+alt+k"
+
+
+def test_settings_shows_hotkeys_refused_at_startup(rig):
+    rig.window.settings.hotkeys.record = "ctrl+alt+k"
+    rig.window._router.start()              # as at startup
+    seen = []
+
+    def act(dialog: SettingsDialog) -> None:
+        seen.append((dialog.message.cget("text"),
+                     str(dialog.entries["record"].cget("style")),
+                     str(dialog.entries["play"].cget("style"))))
+        dialog.ok_button.invoke()           # the same refusal again: kept without asking
+    assert open_dialog(rig, act)
+    text, record_style, play_style = seen[0]
+    assert "Record or stop: Ctrl+Alt+K is in use by another application" in text
+    assert record_style == "Invalid.TEntry" and play_style != "Invalid.TEntry"
+
+
+def test_return_on_the_focused_cancel_button_cancels(rig):
+    show(rig)
+
+    def act(dialog: SettingsDialog) -> None:
+        dialog.number_vars["min_wait_ms"].set("999")
+        dialog.cancel_button.focus_force()
+        dialog.window.update()
+        dialog.cancel_button.event_generate("<Return>")
+    assert not open_dialog(rig, act)
+    assert rig.window.settings.recording.min_wait_ms == 100
+    assert rig.saved == []
 
 
 def test_open_settings_dialog_without_a_router_saves_atomically(rig, tmp_path, monkeypatch):

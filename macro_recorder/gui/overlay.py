@@ -162,9 +162,13 @@ class Overlay:
     # ------------------------------------------------------------ public API
 
     def show(self, shape: OverlayShape | None) -> None:
-        """Draw ``shape``; None hides the overlay."""
+        """Draw ``shape``; None hides the overlay.
+
+        While the application has no focus the shape is only kept, and drawn
+        when the focus comes back.
+        """
         self._shape = shape
-        if shape is None or not self._enabled or self._closed:
+        if shape is None or not self._enabled or self._closed or not self._has_focus():
             self._withdraw()
             return
         self._draw(shape)
@@ -178,7 +182,7 @@ class Overlay:
         self._enabled = enabled
         if not enabled:
             self._withdraw()
-        elif self._shape is not None and not self._closed:
+        elif self._shape is not None and not self._closed and self._has_focus():
             self._draw(self._shape)
 
     def close(self) -> None:
@@ -282,15 +286,22 @@ class Overlay:
         if self._visible:
             self._root.after(1, self._hide_if_unfocused)
 
-    def _hide_if_unfocused(self) -> None:
+    def _has_focus(self) -> bool:
+        """Whether a widget of the application has the keyboard focus.
+
+        ``focus_get`` raises KeyError for a focused widget Tk cannot name,
+        such as a menu's internal clone; that still counts as focused.
+        """
         try:
-            focused = self._root.focus_get()
+            return self._root.focus_get() is not None
         except (KeyError, tk.TclError):
-            return
-        if focused is None:
+            return True
+
+    def _hide_if_unfocused(self) -> None:
+        if not self._has_focus():
             self._withdraw()
 
     def _on_focus_in(self, _event: tk.Event) -> None:
         if not self._visible and self._enabled and self._shape is not None \
-                and self._window is not None and not self._closed:
+                and not self._closed:
             self._draw(self._shape)

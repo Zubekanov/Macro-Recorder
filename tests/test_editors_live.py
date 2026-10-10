@@ -1,11 +1,13 @@
 """The Details panel, its field widgets and the overlay against a real Tk.
 
 Run only under Xvfb: ``MACRO_RECORDER_LIVE_X=1 xvfb-run -a pytest -m live_x``.
-The root stays withdrawn; edits are made by setting the fields' StringVars,
-which is what typing does.
+The root stays withdrawn, except where the overlay needs the focus; edits
+are made by setting the fields' StringVars, which is what typing does.
 """
 
 from __future__ import annotations
+
+import time
 
 import pytest
 
@@ -396,6 +398,14 @@ def test_overlay_is_shaped_to_its_marks_and_click_through(root):
     overlay = Overlay(root, own, enabled=True)
     overlay.show(OverlayShape("click", ((200, 150),)))
     root.update()
+    assert not overlay._visible                     # no focus: the shape is only kept
+    root.deiconify()
+    root.focus_force()
+    root.update()
+    deadline = time.monotonic() + 3.0
+    while not overlay._visible and time.monotonic() < deadline:
+        root.update()
+        time.sleep(0.01)
     assert overlay._xid is not None, "the SHAPE extension is expected under Xvfb"
     xid = overlay._xid
     inner = x11.window(overlay._display, overlay._window.winfo_id())

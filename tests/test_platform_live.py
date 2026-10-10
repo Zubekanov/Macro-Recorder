@@ -15,6 +15,7 @@ from macro_recorder.platform import x11
 from macro_recorder.platform.input import (
     XGrabHotkeys, XI2StopKeyWatcher, XRecordListener, XTestInput, capture_point,
 )
+from macro_recorder.platform.session import OwnWindows
 from macro_recorder.platform.windows import X11WindowManager, create_window_manager
 
 pytestmark = pytest.mark.live_x
@@ -91,6 +92,25 @@ def test_find_reports_tk_geometry(probe, wm, display):
     assert wm.find("no such window") is None
     assert info.id in [w.id for w in wm.list()]
     assert wm.refresh(info) == info
+
+
+def test_own_windows_never_match(probe, tk, display):
+    probe.title("xed-demo - Macro Recorder")
+    probe.update()
+    own = OwnWindows()
+    own.add(x11.tk_toplevel_xid(display, probe.winfo_id()))
+    manager = X11WindowManager(own_windows=own)
+    try:
+        assert manager.find("xed") is None
+        xed = tk.Toplevel(probe)
+        xed.title("notes.txt - xed")
+        xed.geometry("100x100+500+300")
+        xed.update()
+        found = manager.find("xed")
+        assert found is not None and found.title == "notes.txt - xed"
+        assert "xed-demo - Macro Recorder" not in [w.title for w in manager.list()]
+    finally:
+        manager.close()
 
 
 def test_move_settles_on_the_new_rect(probe, wm):

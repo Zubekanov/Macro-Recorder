@@ -27,6 +27,7 @@ from macro_recorder.model.document import MacroDocument
 from macro_recorder.model.protocols import (
     HotkeyGrabber, InputBackend, InputListener, Mode, Screen, StopKeyWatcher, WindowManager,
 )
+from macro_recorder.platform.session import OwnWindows
 
 log = logging.getLogger(__name__)
 
@@ -60,16 +61,17 @@ class PlatformFactories:
     player: Callable[..., Player] = Player
 
 
-def default_factories() -> PlatformFactories:
+def default_factories(own_windows: OwnWindows) -> PlatformFactories:
     """The X11 implementations.  The injector and the stop-key watcher share one
-    SyntheticKeys record, so the watcher's fallback can ignore injected keys."""
+    SyntheticKeys record, so the watcher's fallback can ignore injected keys.
+    The window manager leaves ``own_windows`` out of window matching."""
     from macro_recorder.engine.screen import XScreen
     from macro_recorder.platform import input as xinput
     from macro_recorder.platform.windows import create_window_manager
 
     synthetic = xinput.SyntheticKeys()
     return PlatformFactories(
-        windows=create_window_manager,
+        windows=lambda: create_window_manager(own_windows=own_windows),
         input=lambda: xinput.XTestInput(synthetic=synthetic),
         screen=XScreen,
         listener=xinput.XRecordListener,

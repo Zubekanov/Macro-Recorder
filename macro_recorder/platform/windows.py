@@ -5,7 +5,9 @@ the player, the recorder and the GUI call in from different threads.  An X
 error other than a vanished window, or a closed connection, drops the
 connection; the next call reconnects.  Activation, moves and maximising poll
 every 50 ms until two reads agree or ``settle_ms`` passes, releasing the lock
-between reads.
+between reads.  Windows registered in the application's
+:class:`~macro_recorder.platform.session.OwnWindows` are left out of
+:meth:`X11WindowManager.list` and so never match a window row.
 
 :class:`NullWindowManager` stands in when there is no X display.
 """
@@ -21,6 +23,7 @@ from typing import Any, Callable, TypeVar
 
 from macro_recorder.model.protocols import Clock, Monitor, Rect, WindowInfo
 from macro_recorder.platform import x11
+from macro_recorder.platform.session import OwnWindows
 
 log = logging.getLogger(__name__)
 
@@ -101,9 +104,11 @@ def monitor_work_areas(rects: list[Rect], work: Rect | None) -> list[Monitor]:
 class X11WindowManager:
     """``WindowManager`` over EWMH on one locked display connection."""
 
-    def __init__(self, display_name: str | None = None, clock: Clock | None = None) -> None:
+    def __init__(self, display_name: str | None = None, clock: Clock | None = None,
+                 own_windows: OwnWindows | None = None) -> None:
         self._display_name = display_name
         self._clock = clock or _SystemClock()
+        self._own_windows = own_windows
         self._display = None
         self._time_window = None
         self._lock = threading.RLock()
@@ -144,7 +149,12 @@ class X11WindowManager:
     # -- queries ------------------------------------------------------------
 
     def list(self) -> list[WindowInfo]:
-        return self._call(x11.list_windows, [])
+        """Titled top-level windows, top-most first, without the application's own."""
+        windows = self._call(x11.list_windows, [])
+        own = self._own_windows
+        if own is None:
+            return windows
+        return [w for w in windows if not own.contains(w.id, include_overlay=True)]
 
     def active(self) -> WindowInfo | None:
         def read(d):
@@ -322,8 +332,13 @@ class NullWindowManager:
         return None
 
 
-def create_window_manager(display_name: str | None = None) -> X11WindowManager | NullWindowManager:
-    """An X11WindowManager when the display opens, else a NullWindowManager."""
+def create_window_manager(display_name: str | None = None, own_windows: OwnWindows | None = None
+                          ) -> X11WindowManager | NullWindowManager:
+    """An X11WindowManager when the display opens, else a NullWindowManager.
+
+    ``own_windows`` names the application's windows, which ``list`` and
+    ``find`` leave out.
+    """
     if not (display_name or os.environ.get("DISPLAY")):
         return NullWindowManager()
     try:
@@ -331,4 +346,4 @@ def create_window_manager(display_name: str | None = None) -> X11WindowManager |
     except OSError as e:
         log.warning("X11 unavailable, window management disabled: %s", e)
         return NullWindowManager()
-    return X11WindowManager(display_name)
+    return X11WindowManager(display_name, own_windows=own_windows)

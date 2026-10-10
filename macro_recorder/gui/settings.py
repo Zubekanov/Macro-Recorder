@@ -374,9 +374,11 @@ class SettingsDialog:
 
         window.bind("<KeyPress>", self._on_key)
         for sequence in ("<Return>", "<KP_Enter>"):
-            window.bind(sequence, lambda e: self._on_key(e) if self.capturing else self.ok())
+            window.bind(sequence, self._on_return)
         window.bind("<Escape>", lambda e: self._on_key(e) if self.capturing else self.cancel())
         window.protocol("WM_DELETE_WINDOW", self.cancel)
+        if router is not None and router.failures:
+            self._show_refusals(router.failures)
         place_over(window, master)
 
     def _number_row(self, parent: tk.Misc, row: int, setting: NumberSetting) -> None:
@@ -437,6 +439,17 @@ class SettingsDialog:
         self.entries[name].focus_set()
         return "break"
 
+    def _on_return(self, event: Any) -> str | None:
+        """Return presses the focused button, or OK; while capturing it is the combo."""
+        if self.capturing:
+            return self._on_key(event)
+        focused = self.window.focus_get()
+        if focused is not None and focused.winfo_class() == "TButton":
+            focused.invoke()
+        else:
+            self.ok()
+        return "break"
+
     # -- OK and Cancel -------------------------------------------------------
 
     def collect(self) -> tuple[Settings, dict[str, str]]:
@@ -493,10 +506,16 @@ class SettingsDialog:
             self._settings.hotkeys = current
         if not refused or refused == self._accepted_refusals:
             return True
+        self._show_refusals(refused)
+        return False
+
+    def _show_refusals(self, refused: dict[str, str]) -> None:
+        """Mark the refused hotkey fields; OK with the same refusals keeps them."""
         self._accepted_refusals = refused
+        for name in refused:
+            self.entries[name].configure(style="Invalid.TEntry")
         lines = ["%s: %s" % (dict(HOTKEY_FIELDS)[name], text) for name, text in refused.items()]
         self._show("\n".join(lines + ["Press OK again to keep these hotkeys."]))
-        return False
 
     def cancel(self) -> None:
         """Close without saving; the router grabs the unchanged combos again."""

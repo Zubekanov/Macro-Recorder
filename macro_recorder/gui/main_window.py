@@ -53,6 +53,7 @@ APP_NAME = "Macro Recorder"
 IDLE_PUMP_MS = 200
 BUSY_PUMP_MS = 50
 DETAILS_WIDTH = 400
+MIN_LAYOUT_WIDTH = 100     # narrower Configure events come before the first real layout
 CLIPBOARD_KEY = "macro_recorder_rows"
 VIEW_MODES = frozenset(Mode) - {Mode.PAUSED}
 _WHOLE_NUMBER = re.compile(r"[0-9]+")
@@ -885,13 +886,14 @@ class MainWindow:
         self.elapsed_label.configure(text=format_elapsed(self._stopwatch.elapsed()))
 
     def _place_details_sash(self, event: tk.Event) -> None:
-        """On the first real layout, give the Details panel its width; the table
-        takes the rest.  Later the user's sash position stands."""
-        if event.width <= DETAILS_WIDTH * 2 or self._sash_binding is None:
+        """On the first real layout, give the Details panel its width (at most
+        half of a narrow window); the table takes the rest.  Later the user's
+        sash position stands."""
+        if event.width < MIN_LAYOUT_WIDTH or self._sash_binding is None:
             return
         self.upper_pane.unbind("<Configure>", self._sash_binding)
         self._sash_binding = None
-        self.upper_pane.sashpos(0, event.width - DETAILS_WIDTH)
+        self.upper_pane.sashpos(0, max(event.width - DETAILS_WIDTH, event.width // 2))
 
     def _restore_log_height(self) -> None:
         self.root.update_idletasks()

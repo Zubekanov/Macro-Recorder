@@ -20,6 +20,7 @@ from macro_recorder.model.protocols import Rect, WindowInfo
 from macro_recorder.platform import input as xinput_mod
 from macro_recorder.platform import x11
 from macro_recorder.platform.input import XGrabHotkeys, XTestInput, _capture_loop
+from macro_recorder.platform.session import OwnWindows
 from macro_recorder.platform.windows import X11WindowManager
 from tests.conftest import FakeClock
 from tests.test_x11_helpers import MODIFIERS, ROWS
@@ -427,6 +428,23 @@ def test_call_returns_default_when_the_display_cannot_open(monkeypatch):
         raise OSError("no display")
     monkeypatch.setattr(x11, "open_display", refuse)
     assert X11WindowManager().list() == []
+
+
+def test_list_and_find_leave_out_own_windows(displays, monkeypatch):
+    rect = Rect(0, 0, 10, 10)
+    own_window = WindowInfo(1, "xed-demo - Macro Recorder", rect, rect)
+    overlay = WindowInfo(2, "overlay", rect, rect)
+    xed = WindowInfo(3, "notes.txt - xed", rect, rect)
+    monkeypatch.setattr(x11, "list_windows", lambda d: [own_window, overlay, xed])
+    own = OwnWindows()
+    own.add(1)
+    own.add(2, overlay=True)
+    wm = X11WindowManager(own_windows=own)
+    assert wm.list() == [xed]
+    assert wm.find("xed") == xed
+    own.add(3)
+    assert wm.find("xed") is None
+    assert X11WindowManager().find("xed") == own_window
 
 
 def test_unexpected_exceptions_propagate(displays):

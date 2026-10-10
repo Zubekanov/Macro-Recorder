@@ -35,9 +35,12 @@ from macro_recorder.model.actions.wait import format_colour
 from macro_recorder.model.actions.wait import parse_colour as _parse_rgb
 from macro_recorder.model.catalogue import END_TARGET, START_TARGET, FieldKind, FieldSpec
 from macro_recorder.model.fileformat import MAX_MAGNITUDE
-from macro_recorder.model.keys import combo_from_names, parse_combo
+from macro_recorder.model.keys import combo_from_names, format_combo, parse_combo
 from macro_recorder.model.validate import EXPRESSION_TEXT_FIELDS, TEMPLATE_COMMAND_FIELDS
 from macro_recorder.platform.x11 import keysym_from_name
+
+# A space between two word characters, as in the display form "Page Down".
+_KEY_NAME_SPACE_RE = re.compile(r"(?<=\w) (?=\w)")
 
 # A plain decimal number; any other text is an expression.
 _NUMBER_RE = re.compile(r"^[+-]?(\d+(\.\d*)?|\.\d+)$")
@@ -286,12 +289,17 @@ def parse_key_field(text: str, spec: FieldSpec) -> Parsed:
     """KEY (one keysym name) or KEY_COMBO (stored as ``ctrl+shift+s``).
 
     Every name must be a known X keysym, so a typo is red here rather than
-    an error at playback.
+    an error at playback.  A combination also takes the display form
+    (``Ctrl+Page Down``); its letter key is stored in lower case, since a
+    combination names physical keys.
     """
     try:
-        names = parse_combo(text)
+        names = parse_combo(_KEY_NAME_SPACE_RE.sub("_", text))
     except ValueError as e:
         raise FieldError(str(e)) from None
+    key = names[-1]
+    if spec.kind == FieldKind.KEY_COMBO and len(key) == 1 and key.isalpha():
+        names = names[:-1] + (key.lower(),)
     unknown = [name for name in names if not keysym_from_name(name)]
     if unknown:
         raise FieldError("%s: unknown key %s" % (spec.label, ", ".join(map(repr, unknown))))
@@ -300,6 +308,21 @@ def parse_key_field(text: str, spec: FieldSpec) -> Parsed:
             raise FieldError("%s takes one key, not a combination" % spec.label)
         return Parsed({spec.key: names[0]})
     return Parsed({spec.key: combo_from_names(names)})
+
+
+def format_key_field(value: Any, spec: FieldSpec) -> str:
+    """A KEY_COMBO in display form (``Ctrl+End``) when that parses back to the
+    same stored value; a KEY, or a combination that would change, as stored."""
+    text = "" if value is None else str(value)
+    if spec.kind != FieldKind.KEY_COMBO or not text:
+        return text
+    try:
+        shown = format_combo(parse_combo(text))
+        if parse_key_field(shown, spec).values.get(spec.key) == text:
+            return shown
+    except ValueError:        # FieldError included
+        pass
+    return text
 
 
 def resolve_file(value: str, document_dir: str | None) -> str:
@@ -859,7 +882,11 @@ class KeyField(_EntryField):
 
     def _capture(self) -> None:
         single = self.spec.kind == FieldKind.KEY
-        self.context.request_key_capture(single, self._vars[0].set)
+        self.context.request_key_capture(
+            single, lambda stored: self._vars[0].set(format_key_field(stored, self.spec)))
+
+    def texts(self, values: Mapping[str, Any]) -> list[str]:
+        return [format_key_field(values.get(self.spec.key), self.spec)]
 
     def parse(self) -> Parsed:
         return parse_key_field(self.text(), self.spec)

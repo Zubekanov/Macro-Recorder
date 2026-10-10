@@ -88,7 +88,7 @@ def main(argv: list[str] | None = None) -> int:
     except tk.TclError as e:
         print("Cannot start the interface: %s" % e, file=sys.stderr)
         return 2
-    platform = Platform(default_factories()) if problem is None else None
+    platform = Platform(default_factories(session.own_windows)) if problem is None else None
     resolver = X11ToplevelIds() if problem is None else None
     window = MainWindow(root, settings, own_windows=session.own_windows, platform=platform,
                         session_problem=problem, resolve_xid=resolver)

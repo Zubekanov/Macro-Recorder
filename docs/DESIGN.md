@@ -106,7 +106,9 @@ class Row:
   previous group; its group plays with no window context.
 - Labels live only on rows and are unique, case-insensitive, never "Start"
   or "End". Renaming a label rewrites every target that used it in the same
-  undo step. Paste clears a label that already exists and logs it.
+  undo step. Clearing a label that rows jump to is refused (`replace_row`
+  and `rename_label` raise ValueError naming those rows; `rename_problem`
+  gives the same text for live validation). Paste clears a label that already exists and logs it.
 - `MacroDocument` holds `rows: tuple[Row, ...]`, `filter`, `path_mode`, a
   revision counter and `saved_revision` (dirty means they differ), and the
   undo stack. Operations: `insert(index, rows)`, `delete(ids)`,
@@ -410,7 +412,9 @@ from the active-window watcher.
   marker for an application window.
 - Application window ids come from `session.own_windows`: every Tk
   toplevel registers `tk_toplevel_xid(winfo_id())` on `<Map>` and
-  unregisters on `<Destroy>`.
+  unregisters on `<Destroy>`. The window manager built for the GUI is given
+  the same registry, so `list()` and `find()` never return an application
+  window and a window row cannot match Macro Recorder's own title.
 - F6 and the record hotkey are never recorded. When the record combo stops
   a recording, the recorder drops the combo's final press and walks back
   removing the trailing modifier presses without releases. Releases arriving
@@ -424,14 +428,14 @@ from the active-window watcher.
 | Concern | Implementation |
 |---|---|
 | Session | `session.check()` refuses recording and playback when `XDG_SESSION_TYPE` is `wayland`, `WAYLAND_DISPLAY` is set, or `DISPLAY` is unset. The GUI shows a dialog and disables Record and Play; the CLI exits 2. |
-| Keys | The model stores X keysym names (`a`, `KP_1`, `Return`, `Control_L`, `F6`). Combos are `ctrl+shift+s` with aliases `ctrl`, `shift`, `alt`, `super` and are shown as `Ctrl+Shift+S`. `input.py` converts a name to a keycode with `keysym_to_keycode`, borrowing a spare keycode for unmapped keysyms and restoring it after. A `live_x` test resolves every name in the table. |
+| Keys | The model stores X keysym names (`a`, `KP_1`, `Return`, `Control_L`, `F6`). Combos are `ctrl+shift+s` with aliases `ctrl`, `shift`, `alt`, `super` and are shown as `Ctrl+Shift+S` (a Details key field shows the stored form when the shown form would parse back to a different value, such as `ctrl+S`; letters in a typed combination are stored in lower case). `input.py` converts a name to a keycode with `keysym_to_keycode`, borrowing a spare keycode for unmapped keysyms and restoring it after. A `live_x` test resolves every name in the table. |
 | Injection | XTest only, through `InputBackend`: `move(x, y)`, `press_button`, `release_button`, `scroll(dx, dy)`, `press_key(name)`, `release_key(name)`, `type_text(text)`. The backend counts every synthetic key it sends, by keycode, for the stop-key fallback. |
 | Recording stream | `InputListener` on XRecord with its own two connections, like pynput's design: KeyPress and KeyRelease with keycode and state mapped to a keysym name, ButtonPress, ButtonRelease and MotionNotify with root coordinates. |
 | Stop key | `StopKeyWatcher` selects `XI_RawKeyPress` on the root through XInput2 (python-xlib provides the masks; `x11.py` registers a raw event decoder with `ge_add_event_data`) and ignores events whose `sourceid` is the `Virtual core XTEST keyboard` slave. Synthetic Esc, including autorepeat of a held synthetic Esc, never counts as the user. Where XInput2 2.1 is unavailable the fallback uses XRecord and the injector's counter, ignoring Esc while the injector holds it. |
-| Global hotkeys | `HotkeyGrabber` grabs each combo on the root with `XGrabKey` in the Lock and Mod2 mask variants, so other applications do not see it. A failed grab is reported in the Settings dialog. `Ctrl+Alt+F1..F12`, `Ctrl+Alt+Backspace` and `Ctrl+Alt+Delete` are rejected. Defaults: record toggle `Ctrl+Shift+F9`, play `Ctrl+Shift+F5`. Esc and F6 are observed, never grabbed. |
+| Global hotkeys | `HotkeyGrabber` grabs each combo on the root with `XGrabKey` in the Lock and Mod2 mask variants, so other applications do not see it. A failed grab is reported in the Settings dialog: refusals from startup when it opens, and new ones on OK, where a second OK keeps them. `Ctrl+Alt+F1..F12`, `Ctrl+Alt+Backspace` and `Ctrl+Alt+Delete` are rejected. Defaults: record toggle `Ctrl+Shift+F9`, play `Ctrl+Shift+F5`. Esc and F6 are observed, never grabbed. |
 | Windows | EWMH through one locked connection, with core-protocol fallbacks for Xvfb. `WindowManager`: `list()`, `active()`, `find(pattern, mode)`, `activate(win, settle_ms) -> WindowInfo | None`, `move(win, rect, settle_ms) -> WindowInfo | None`, `set_maximised(win, bool)`, `watch_active(callback) -> stop`, `bell()`, `monitors()`. `WindowInfo` carries id, title, outer rect, client rect, desktop, maximised. `ConnectionClosedError` drops the cached display. |
 | Screen | mss for capture; monitors from `sct.monitors`. Pixel reads capture a 1x1 region. |
-| Overlay | Tk override-redirect toplevel shaped to the drawn marks with an empty input region, shaped before it is mapped. Hidden while recording, playing or when the application loses focus. |
+| Overlay | Tk override-redirect toplevel shaped to the drawn marks with an empty input region, shaped before it is mapped. Hidden while recording, playing or when the application loses focus; a shape set while unfocused is drawn when the focus returns. |
 | Targeting | Its own connection grabs pointer and keyboard on the root (`owner_events` false) and checks both replies, retrying for 500 ms then cancelling with a message. While grabbed it reads ButtonPress, ButtonRelease and KeyPress: the first press captures the point and the colour under it, the matching release ends targeting, Space captures without a click, Esc cancels. Both grabs are released in a `finally`. |
 | OCR | Tesseract via pytesseract. |
 
@@ -441,8 +445,9 @@ from the active-window watcher.
   Record and Edit (Add menubuttons per category, Record, Stop), Playback
   (Play or Continue, Stop, Speed, Repeat with 0 meaning until stopped and
   blank invalid, Filter menubutton, Mouse path, Window timeout, If window
-  missing, Restore windows), View (Output log, Overlay), Help (shortcut
-  text, About). Below: the table with the Details panel on the right; a
+  missing, Restore windows; two rows), View (Output log, Overlay), Help
+  (Keyboard shortcuts, which opens the shortcut text in a message box,
+  and About). Below: the table with the Details panel on the right; a
   bottom pane with Output Log and Variables tabs; a footer with the row
   count, elapsed time and log toggle.
 - **File menu**: New, Open, Recent (10), Save, Save As, Settings, Exit.
@@ -453,10 +458,11 @@ from the active-window watcher.
 - **Table**: columns number, Action, Value, Label, Comment. Treeview iid is
   the row id. Disabled rows show `||` in the number column and grey text;
   filtered rows show their number in brackets and italics; a breakpoint
-  shows a red dot glyph; each window group has its own tint. The table
+  shows `*` in the number column; each window group has its own tint. The table
   applies `Change` notifications incrementally. Any document change,
   scroll, column resize or mode change cancels an open inline editor;
-  Return or FocusOut commits it only if the row still exists. Inline label
+  Return or FocusOut commits it only if the row still exists. The Value
+  column and the Output Log show typed newlines and tabs as `\n` and `\t`. Inline label
   edits validate live. Double-click on the number column toggles the
   breakpoint. Drag drops before the hovered row's upper half or after its
   lower half, with a line marking the position; above the first row is
@@ -510,10 +516,12 @@ from the active-window watcher.
   restore_rect, path_mode default, min_spacing_ms. Recording: record_paths,
   min_move_px, min_wait_ms, click_gap_ms, double_click_ms. Hotkeys: record,
   play. UI: geometry, log_visible, log_height, overlay_enabled, last_folder,
-  recent. Written atomically on dialog OK and on exit. An unreadable file is
+  recent (default geometry 1200x720). Written atomically on dialog OK and
+  on exit. An unreadable file is
   renamed `settings.json.bad` and replaced with defaults. The dialog edits
   Recording, Window and Hotkeys; the hotkey grabber is suspended while it
-  is open and fields capture by key press. The Playback tab holds the
+  is open and fields capture by key press. Return presses the focused
+  button, or OK. The Playback tab holds the
   playback values.
 - **Errors**: `app.main` configures logging to
   `$XDG_CACHE_HOME/macro-recorder/app.log` and the Output Log (WARNING and
