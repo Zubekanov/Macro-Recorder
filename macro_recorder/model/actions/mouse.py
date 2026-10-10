@@ -1,11 +1,14 @@
 """Mouse actions: move, path, timed move, click, scroll.
 
-The field definitions and presets are the contract; ``play``, ``overlay``
-and the path layout are filled in by the Actions A work package.
+Coordinates go through ``ctx.coord`` so the window frame applies; timings go
+through ``ctx.sleep`` so they scale with the playback speed.  Presses go
+through the context's hold bookkeeping so a stop or a pause never leaves a
+button down.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 from typing import Any, Mapping
 
@@ -15,7 +18,10 @@ from macro_recorder.model.actions._common import (
 from macro_recorder.model.catalogue import ActionSpec, FieldKind, FieldSpec, Flow, Preset, make, register
 from macro_recorder.model.document import Row
 from macro_recorder.model.events import EventType
-from macro_recorder.model.protocols import OverlayShape
+from macro_recorder.model.protocols import OverlayShape, PlayContext
+
+# A click moves the pointer first only when it is further away than this.
+CLICK_MOVE_THRESHOLD_PX = 2.0
 
 
 # ---------------------------------------------------------------- mouse_move
@@ -76,12 +82,23 @@ def _overlay_move(row: Row) -> OverlayShape | None:
     return OverlayShape("path" if len(pts) > 1 else "point", tuple(pts))
 
 
+def _play_move(ctx: PlayContext, row: Row) -> Flow:
+    """Set the pointer, or replay a path with its timing (frame applied to every point)."""
+    if not row.is_path:
+        ctx.input.move(*ctx.coord(row.event["x"], row.event["y"]))
+        return Flow.NEXT
+    points = [ctx.coord(e["x"], e["y"]) for e in row.events]
+    dts = [e.dt for e in row.events]
+    stopped = ctx.move_pointer(points, row.span_s * 1000.0, dts)
+    return Flow.STOP if stopped else Flow.NEXT
+
+
 MOUSE_MOVE = register(ActionSpec(
     type=EventType.MOUSE_MOVE.value, name="Mouse Move", category="Mouse", filter_group="mouse_move",
     fields=(coord_pair("x", "y", "Position"),),
     presets=(Preset("Move", "M", lambda: make("mouse_move", x=100, y=100)),),
     layout=_path_layout, read=_path_read, write=_path_write,
-    describe=_describe_move, overlay=_overlay_move, multi_event=True,
+    describe=_describe_move, overlay=_overlay_move, play=_play_move, multi_event=True,
 ))
 
 
@@ -100,6 +117,17 @@ def _overlay_timed(row: Row) -> OverlayShape | None:
     return OverlayShape("line", ((float(vals[0]), float(vals[1])), (float(vals[2]), float(vals[3]))))
 
 
+def _play_timed(ctx: PlayContext, row: Row) -> Flow:
+    """Jump to the first point, then move to the second along the path mode."""
+    e = row.event
+    start = ctx.coord(e["x"], e["y"])
+    end = ctx.coord(e["x2"], e["y2"])
+    duration_ms = max(0.0, ctx.resolve(e["duration_ms"]))
+    ctx.input.move(*start)
+    stopped = ctx.move_pointer([start, end], duration_ms)
+    return Flow.STOP if stopped else Flow.NEXT
+
+
 MOUSE_MOVE_TIMED = register(ActionSpec(
     type=EventType.MOUSE_MOVE_TIMED.value, name="Mouse Move Point-to-Point", category="Mouse",
     filter_group="mouse_move",
@@ -107,7 +135,7 @@ MOUSE_MOVE_TIMED = register(ActionSpec(
             duration("duration_ms", "Duration", 500)),
     presets=(Preset("Move point-to-point", None,
                     lambda: make("mouse_move_timed", x=100, y=100, x2=200, y2=200, duration_ms=500)),),
-    describe=_describe_timed, overlay=_overlay_timed,
+    describe=_describe_timed, overlay=_overlay_timed, play=_play_timed,
 ))
 
 
@@ -134,6 +162,38 @@ def _overlay_click(row: Row) -> OverlayShape | None:
     return OverlayShape("click", ((float(e["x"]), float(e["y"])),))
 
 
+def _move_if_away(ctx: PlayContext, x: float, y: float) -> None:
+    px, py = ctx.input.position()
+    if math.hypot(x - px, y - py) > CLICK_MOVE_THRESHOLD_PX:
+        ctx.input.move(x, y)
+
+
+def _play_click(ctx: PlayContext, row: Row) -> Flow:
+    """Press and release ``count`` times, or do the down or up half alone."""
+    e = row.event
+    button = e["button"]
+    _move_if_away(ctx, *ctx.coord(e["x"], e["y"]))
+    action = e["action"]
+    if action == "down":
+        ctx.hold_button(button)
+        return Flow.NEXT
+    if action == "up":
+        ctx.unhold_button(button)
+        return Flow.NEXT
+    hold_ms = max(0.0, ctx.resolve(e["hold_ms"]))
+    interval_ms = max(0.0, ctx.resolve(e["interval_ms"]))
+    count = max(1, int(e["count"]))
+    for i in range(count):
+        ctx.hold_button(button)
+        stopped = hold_ms > 0 and ctx.sleep(hold_ms)
+        ctx.unhold_button(button)
+        if stopped:
+            return Flow.STOP
+        if i < count - 1 and interval_ms > 0 and ctx.sleep(interval_ms):
+            return Flow.STOP
+    return Flow.NEXT
+
+
 MOUSE_CLICK = register(ActionSpec(
     type=EventType.MOUSE_CLICK.value, name="Mouse Click", category="Mouse", filter_group="mouse_click",
     fields=(
@@ -153,7 +213,7 @@ MOUSE_CLICK = register(ActionSpec(
         Preset("Click down", None, lambda: make("mouse_click", x=100, y=100, action="down")),
         Preset("Click up", None, lambda: make("mouse_click", x=100, y=100, action="up")),
     ),
-    describe=_describe_click, overlay=_overlay_click,
+    describe=_describe_click, overlay=_overlay_click, play=_play_click,
 ))
 
 
@@ -177,6 +237,26 @@ def _describe_scroll(row: Row) -> str:
     return text
 
 
+def _sign(value: int) -> int:
+    return 1 if value > 0 else -1
+
+
+def _play_scroll(ctx: PlayContext, row: Row) -> Flow:
+    """Move when a position is set, then one notch at a time: vertical, then horizontal."""
+    e = row.event
+    if e["x"] is not None and e["y"] is not None:
+        ctx.input.move(*ctx.coord(e["x"], e["y"]))
+    dx = ctx.resolve_int(e["dx"])
+    dy = ctx.resolve_int(e["dy"])
+    notches = [(0, _sign(dy))] * abs(dy) + [(_sign(dx), 0)] * abs(dx)
+    notch_ms = max(0.0, ctx.resolve(e["notch_ms"]))
+    for i, (nx, ny) in enumerate(notches):
+        if i and notch_ms > 0 and ctx.sleep(notch_ms):
+            return Flow.STOP
+        ctx.input.scroll(nx, ny)
+    return Flow.NEXT
+
+
 MOUSE_SCROLL = register(ActionSpec(
     type=EventType.MOUSE_SCROLL.value, name="Mouse Scroll", category="Mouse", filter_group="mouse_scroll",
     fields=(
@@ -186,5 +266,5 @@ MOUSE_SCROLL = register(ActionSpec(
         duration("notch_ms", "Notch interval", 30, allow_expr=False),
     ),
     presets=(Preset("Scroll", "S", lambda: make("mouse_scroll", dy=3)),),
-    describe=_describe_scroll, overlay=_overlay_click,
+    describe=_describe_scroll, overlay=_overlay_click, play=_play_scroll,
 ))
