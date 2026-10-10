@@ -146,11 +146,93 @@ def test_clearing_a_label_that_rows_jump_to_is_refused():
     assert doc.row(b).event["target"] == "again" and doc.row(d).event["target"] == "again"
 
 
-def test_paste_clears_duplicate_labels():
+def test_paste_renames_duplicate_labels_and_clears_invalid_ones():
     doc = MacroDocument()
     doc.append([wait(1, label="top")])
     (pasted,) = doc.append([wait(2, label="top")])
-    assert doc.row(pasted).label == ""
+    assert doc.row(pasted).label == "top 2"
+    (again,) = doc.append([wait(3, label="Top")])
+    assert doc.row(again).label == "Top 3"
+    (bad,) = doc.append([wait(4, label="Start")])
+    assert doc.row(bad).label == ""
+
+
+def test_pasted_block_jumps_inside_itself():
+    doc = MacroDocument()
+    block = [wait(1, label="Loop"), make_row(make("repeat", target="Loop", count=3)), goto("Loop")]
+    doc.append(block)
+    ids = doc.append(block)
+    copy = [doc.row(i) for i in ids]
+    assert copy[0].label == "Loop 2"
+    assert copy[1].event["target"] == "Loop 2" and copy[2].event["target"] == "Loop 2"
+    assert doc.rows[1].event["target"] == "Loop"
+
+
+def test_pasted_labels_are_renamed_all_at_once():
+    doc = MacroDocument()
+    doc.append([wait(1, label="A")])
+    ids = doc.append([wait(2, label="A"), wait(3, label="A 2"), goto("A"), goto("A 2")])
+    rows = [doc.row(i) for i in ids]
+    assert [r.label for r in rows[:2]] == ["A 2", "A 2 2"]
+    assert rows[2].event["target"] == "A 2" and rows[3].event["target"] == "A 2 2"
+
+
+def test_rename_label_retargets_the_renamed_row_itself():
+    doc = MacroDocument()
+    (a, b) = doc.append([make_row(make("wait_pixel", on_timeout="goto", target="retry"), label="retry"),
+                         goto("retry")])
+    doc.rename_label(a, "again")
+    assert doc.row(a).event["target"] == "again"
+    assert doc.row(b).event["target"] == "again"
+
+
+def test_clearing_a_label_ignores_hidden_targets():
+    doc = MacroDocument()
+    (a, b) = doc.append([wait(1, label="Retry"),
+                         make_row(make("wait_pixel", on_timeout="abort", target="Retry"))])
+    doc.rename_label(a, "")
+    assert doc.row(a).label == ""
+    (c, d) = doc.append([wait(1, label="Back"),
+                         make_row(make("wait_pixel", on_timeout="goto", target="Back"))])
+    with pytest.raises(ValueError, match="jumps to 'Back'"):
+        doc.rename_label(c, "")
+
+
+def test_undo_then_a_new_edit_is_dirty():
+    doc = MacroDocument()
+    doc.set_path_mode("linear")
+    doc.mark_saved()
+    doc.undo()
+    doc.set_path_mode("spline")
+    assert doc.dirty
+    doc2 = MacroDocument()
+    doc2.append([wait(1)])
+    doc2.mark_saved()
+    doc2.undo()
+    doc2.append([make_row(make("beep"))])
+    assert doc2.dirty
+    doc2.undo()
+    doc2.redo()
+    assert doc2.dirty
+
+
+def test_undo_and_redo_back_to_the_save_are_clean():
+    doc = MacroDocument()
+    doc.append([wait(1)])
+    doc.mark_saved()
+    doc.append([wait(2)])
+    doc.undo()
+    assert not doc.dirty
+    doc.redo()
+    assert doc.dirty
+    doc.undo()
+    assert not doc.dirty
+
+
+def test_reset_without_history_is_dirty():
+    doc = MacroDocument()
+    doc.reset([wait(1)], clear_history=False)
+    assert doc.dirty
 
 
 def test_split_path_keeps_metadata_and_turns_gaps_into_delays():
@@ -168,6 +250,15 @@ def test_split_path_keeps_metadata_and_turns_gaps_into_delays():
     assert len(doc.rows) == 1 and doc.rows[0].is_path
 
 
+def test_split_several_paths_is_one_undo_step():
+    doc = MacroDocument()
+    ids = doc.append([path([(0, 0), (1, 1)]), wait(1), path([(5, 5), (6, 6), (7, 7)])])
+    result = doc.split(ids)
+    assert len(doc.rows) == 6 and result == tuple(r.id for r in doc.rows)
+    doc.undo()
+    assert [r.is_path for r in doc.rows] == [True, False, True]
+
+
 def test_filter_and_path_mode_are_undoable_and_dirty():
     doc = MacroDocument()
     doc.set_filter(["wait", "bogus", "mouse_move"])
@@ -178,6 +269,12 @@ def test_filter_and_path_mode_are_undoable_and_dirty():
     assert doc.path_mode == "recorded" and doc.filter == ("mouse_move", "wait")
     with pytest.raises(ValueError):
         doc.set_path_mode("zigzag")
+
+
+def test_set_filter_accepts_a_generator():
+    doc = MacroDocument()
+    doc.set_filter(g for g in ("wait", "keyboard"))
+    assert doc.filter == ("keyboard", "wait")
 
 
 def test_plays_respects_enabled_and_filter():

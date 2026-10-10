@@ -46,13 +46,14 @@ def test_runs_in_cwd_or_home(tmp_path):
 def test_unwaited_returns_none_and_is_reaped(tmp_path):
     stop = threading.Event()
     marker = tmp_path / "done"
+    before = set(threading.enumerate())
     assert run("touch '%s'" % marker, None, False, 0, stop) is None
     deadline = time.monotonic() + 3
     while not marker.exists() and time.monotonic() < deadline:
         time.sleep(0.02)
     assert marker.exists()
     time.sleep(0.1)
-    assert not any(t.name.startswith("reaper-") for t in threading.enumerate())
+    assert not any(t.name.startswith("reaper-") for t in set(threading.enumerate()) - before)
 
 
 def test_stop_kills_the_process_group(tmp_path):
@@ -142,6 +143,23 @@ def test_terminate_ends_unwaited_children(tmp_path):
 
 def test_terminate_ignores_finished_children():
     children = []
-    run("true", None, False, 0, threading.Event(), children)
-    children[0].wait(3)
-    terminate(children)
+    run("sleep 0.2", None, False, 0, threading.Event(), children)
+    (proc,) = children
+    proc.wait(3)
+    terminate([proc])
+
+
+def test_a_finished_unwaited_child_is_dropped_once_its_group_is_gone(tmp_path):
+    children = []
+    pidfile = tmp_path / "pid"
+    # The leader exits at once; its background grandchild keeps the group alive.
+    run("sleep 1 & echo $! > '%s'" % pidfile, None, False, 0, threading.Event(), children)
+    (proc,) = children
+    proc.wait(3)
+    time.sleep(0.2)
+    assert children == [proc]           # the group still exists, so it can still be ended
+    deadline = time.monotonic() + 5
+    while children:
+        assert time.monotonic() < deadline, "the stale child was never dropped"
+        time.sleep(0.05)
+    assert _wait_gone(int(pidfile.read_text()))

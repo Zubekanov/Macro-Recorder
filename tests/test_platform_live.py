@@ -94,6 +94,43 @@ def test_find_reports_tk_geometry(probe, wm, display):
     assert wm.refresh(info) == info
 
 
+def test_gtk_frame_extents_are_left_out_of_the_outer_rect(probe, wm, display):
+    from Xlib import Xatom
+    info = wm.find(ALPHA)
+    win = x11.window(display, info.id)
+    win.change_property(x11.atom(display, "_GTK_FRAME_EXTENTS"), Xatom.CARDINAL, 32, [10, 10, 5, 15])
+    display.sync()
+    seen = wm.refresh(info)
+    assert seen.client_rect == Rect(120, 80, 300, 200)
+    assert seen.rect == Rect(130, 85, 280, 180)
+    moved = wm.move(seen, Rect(200, 150, 280, 180), settle_ms=1000)
+    assert moved is not None and moved.rect == Rect(200, 150, 280, 180)
+    assert moved.client_rect == Rect(190, 145, 300, 200)
+
+
+def test_transient_chain_and_work_area_properties(probe, tk, display):
+    from Xlib import Xatom
+    dialog = tk.Toplevel(probe)
+    dialog.title("dialog")
+    dialog.transient(probe)
+    dialog.update()
+    parent = x11.tk_toplevel_xid(display, probe.winfo_id())
+    child = x11.tk_toplevel_xid(display, dialog.winfo_id())
+    assert x11.transient_reaches(display, child, parent)
+    assert not x11.transient_reaches(display, parent, child)
+    root = display.screen().root
+    name = x11.atom(display, "_GTK_WORKAREAS_D0")
+    try:
+        assert x11.gtk_work_areas(display) is None
+        root.change_property(name, Xatom.CARDINAL, 32, [0, 0, 1600, 960])
+        display.sync()
+        assert x11.gtk_work_areas(display) == [Rect(0, 0, 1600, 960)]
+    finally:
+        root.delete_property(name)
+        display.sync()
+    assert x11.panel_struts(display) == []          # no window manager, no client list
+
+
 def test_own_windows_never_match(probe, tk, display):
     probe.title("xed-demo - Macro Recorder")
     probe.update()
@@ -324,6 +361,23 @@ def test_hotkey_grab_fires_suspends_and_blocks_other_clients(injector):
     finally:
         first.close()
         second.close()
+
+
+def test_wait_keys_released_waits_for_the_held_combo(injector):
+    grabber = XGrabHotkeys()
+    try:
+        assert grabber.wait_keys_released(1.0)
+        injector.press_key("Control_L")
+        injector.press_key("F5")
+        started = time.monotonic()
+        assert not grabber.wait_keys_released(0.2)
+        assert time.monotonic() - started >= 0.2
+        threading.Timer(0.2, lambda: (injector.release_key("F5"),
+                                      injector.release_key("Control_L"))).start()
+        assert grabber.wait_keys_released(3.0)
+    finally:
+        injector.release_all()
+        grabber.close()
 
 
 def test_resume_reports_a_combo_taken_while_suspended():

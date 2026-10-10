@@ -197,13 +197,41 @@ def window_title(d, win) -> str:
     return value or ""
 
 
+def combined_extents(net: Sequence[int] | None,
+                     gtk: Sequence[int] | None) -> list[int] | None:
+    """Visible frame extents ``(left, right, top, bottom)`` around the client window.
+
+    ``net`` is _NET_FRAME_EXTENTS, the window manager's decorations outside
+    the client.  ``gtk`` is _GTK_FRAME_EXTENTS, the invisible shadow a
+    client-side-decorated (header-bar) window draws inside its own client
+    area; it counts negatively.  None when neither applies.
+    """
+    net = list(net) if net and len(net) == 4 else None
+    gtk = list(gtk) if gtk and len(gtk) == 4 else None
+    if net is None and gtk is None:
+        return None
+    net = net or [0, 0, 0, 0]
+    gtk = gtk or [0, 0, 0, 0]
+    return [n - g for n, g in zip(net, gtk)]
+
+
+def frame_extents(d, win) -> list[int] | None:
+    """:func:`combined_extents` of the window's two extents properties."""
+    return combined_extents(prop_ints(d, win, "_NET_FRAME_EXTENTS"),
+                            prop_ints(d, win, "_GTK_FRAME_EXTENTS"))
+
+
 def window_rects(d, win) -> tuple[Rect, Rect]:
-    """``(outer, client)`` rectangles of ``win`` in root coordinates."""
+    """``(outer, client)`` rectangles of ``win`` in root coordinates.
+
+    The outer rectangle is what the user sees: the window manager's frame
+    included, a GTK header-bar window's invisible shadow left out.
+    """
     geom = win.get_geometry()
     pos = d.screen().root.translate_coords(win, 0, 0)
     client = Rect(int(pos.x), int(pos.y), int(geom.width), int(geom.height))
     outer = Rect(*outer_rect(client.left, client.top, client.width, client.height,
-                             prop_ints(d, win, "_NET_FRAME_EXTENTS")))
+                             frame_extents(d, win)))
     return outer, client
 
 
@@ -294,6 +322,31 @@ def active_window_id(d) -> int | None:
     return toplevel_of(d, xid)
 
 
+def transient_reaches(d, xid: int, target: int, max_depth: int = 8) -> bool:
+    """True when ``xid``'s WM_TRANSIENT_FOR chain leads to ``target``.
+
+    A window manager that focuses a window's modal dialog instead of the
+    window itself (Mutter, Muffin) makes the dialog active; its chain names
+    the window.
+    """
+    from Xlib.error import BadWindow
+
+    seen = {xid}
+    current = xid
+    for _ in range(max_depth):
+        try:
+            parent = _xid(window(d, current).get_wm_transient_for())
+        except BadWindow:
+            return False
+        if parent == target:
+            return True
+        if not parent or parent in seen:
+            return False
+        seen.add(parent)
+        current = parent
+    return False
+
+
 def _has_wm_state(d, win) -> bool:
     return win.get_full_property(atom(d, "WM_STATE"), X.AnyPropertyType) is not None
 
@@ -363,6 +416,57 @@ def work_area(d) -> Rect | None:
     return Rect(left, top, width, height)
 
 
+def gtk_work_areas(d) -> list[Rect] | None:
+    """The current desktop's per-monitor work areas from ``_GTK_WORKAREAS_D<n>``.
+
+    Muffin and Mutter publish one rectangle per monitor there; None when the
+    window manager does not.
+    """
+    desk = current_desktop(d) or 0
+    value = prop_ints(d, d.screen().root, "_GTK_WORKAREAS_D%d" % desk)
+    if not value or len(value) % 4:
+        return None
+    return [Rect(*value[i:i + 4]) for i in range(0, len(value), 4)]
+
+
+def strut_rects(partial: Sequence[int], screen_w: int, screen_h: int) -> list[Rect]:
+    """Root-coordinate rectangles of a ``_NET_WM_STRUT_PARTIAL`` value (or a
+    four-value ``_NET_WM_STRUT``, which spans the whole edge)."""
+    values = list(partial)
+    if len(values) == 4:
+        values += [0, screen_h - 1, 0, screen_h - 1, 0, screen_w - 1, 0, screen_w - 1]
+    if len(values) != 12:
+        return []
+    left, right, top, bottom, ly0, ly1, ry0, ry1, tx0, tx1, bx0, bx1 = values
+    rects = []
+    if left:
+        rects.append(Rect(0, ly0, left, ly1 - ly0 + 1))
+    if right:
+        rects.append(Rect(screen_w - right, ry0, right, ry1 - ry0 + 1))
+    if top:
+        rects.append(Rect(tx0, 0, tx1 - tx0 + 1, top))
+    if bottom:
+        rects.append(Rect(bx0, screen_h - bottom, bx1 - bx0 + 1, bottom))
+    return rects
+
+
+def panel_struts(d) -> list[Rect]:
+    """Strut rectangles of every managed client that reserves screen space."""
+    from Xlib.error import BadWindow
+
+    w, h = screen_size(d)
+    out: list[Rect] = []
+    for xid in prop_ints(d, d.screen().root, "_NET_CLIENT_LIST") or ():
+        win = window(d, xid)
+        try:
+            value = prop_ints(d, win, "_NET_WM_STRUT_PARTIAL") or prop_ints(d, win, "_NET_WM_STRUT")
+        except BadWindow:
+            continue
+        if value:
+            out.extend(strut_rects(value, w, h))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Activation and placement
 # ---------------------------------------------------------------------------
@@ -425,15 +529,20 @@ def activate(d, xid: int, desktop: int, timestamp: int) -> None:
 
 
 def move_resize(d, xid: int, rect: Rect) -> None:
-    """Place the window's outer frame at ``rect``."""
+    """Place the window's visible outer frame at ``rect`` (see :func:`window_rects`)."""
     win = window(d, xid)
-    cw, ch = client_size(rect.width, rect.height, prop_ints(d, win, "_NET_FRAME_EXTENTS"))
+    cw, ch = client_size(rect.width, rect.height, frame_extents(d, win))
+    # The window manager places its own frame at the given point; a GTK
+    # shadow lies inside the client, so the client starts that much earlier.
+    gtk = prop_ints(d, win, "_GTK_FRAME_EXTENTS")
+    gtk = gtk if gtk and len(gtk) == 4 else [0, 0, 0, 0]
+    x, y = rect.left - gtk[0], rect.top - gtk[2]
     if wm_supports(d, "_NET_MOVERESIZE_WINDOW"):
         flags = (X.NorthWestGravity | _MOVERESIZE_X | _MOVERESIZE_Y
                  | _MOVERESIZE_W | _MOVERESIZE_H | (SOURCE_PAGER << 12))
-        _client_message(d, xid, "_NET_MOVERESIZE_WINDOW", [flags, rect.left, rect.top, cw, ch])
+        _client_message(d, xid, "_NET_MOVERESIZE_WINDOW", [flags, x, y, cw, ch])
     else:
-        win.configure(x=rect.left, y=rect.top, width=cw, height=ch)
+        win.configure(x=x, y=y, width=cw, height=ch)
     d.flush()
 
 
@@ -921,6 +1030,34 @@ class KeyboardMap:
         found = self.find(keysym)
         return found[0] if found else None
 
+    def find_for_state(self, keysym: int, state: int,
+                       level3: bool = True) -> tuple[int, bool, bool] | None:
+        """``(keycode, shift, level3)`` producing ``keysym`` under the live ``state``.
+
+        ``state`` supplies the XKB group (bits 13-14), Caps Lock and Num Lock;
+        the answer says whether Shift and Level 3 must be added.  Each
+        candidate is checked with :meth:`keysym_at`, so the active group, a
+        letter's Caps Lock behaviour and a keypad key's Num Lock behaviour
+        are all taken into account.  Plain wins over Shift, then Level 3,
+        then both; then the lower keycode.  ``level3`` False skips the Level
+        3 options (no Level 3 key to press).
+        """
+        state &= X.LockMask | self.numlock_mask | (3 << 13)
+        targets = {keysym}
+        case = keysym_case(keysym)
+        if case is not None:
+            targets.update(case)
+        candidates = [kc for kc in self.keycodes() if targets.intersection(self.syms(kc))]
+        options = [(False, False), (True, False)]
+        if level3 and self.level3_mask:
+            options += [(False, True), (True, True)]
+        for shift, l3 in options:
+            mods = (X.ShiftMask if shift else 0) | (self.level3_mask if l3 else 0)
+            for keycode in candidates:
+                if self.keysym_at(keycode, state | mods) == keysym:
+                    return keycode, shift, l3
+        return None
+
     def spare_keycodes(self) -> list[int]:
         """Keycodes with no keysyms at all, usable for borrowing."""
         return [kc for kc in self.keycodes() if not any(self.syms(kc))]
@@ -955,6 +1092,13 @@ def lock_variants(kmap: KeyboardMap) -> list[int]:
 def clean_state(state: int, kmap: KeyboardMap) -> int:
     """Strip lock bits, buttons and the XKB group from an event state."""
     return state & 0xFF & ~(X.LockMask | kmap.numlock_mask)
+
+
+def keys_down(d) -> list[int]:
+    """Keycodes currently down, from QueryKeymap (physical and XTest presses)."""
+    keymap = d.query_keymap()
+    return [byte * 8 + bit for byte, bits in enumerate(keymap) for bit in range(8)
+            if bits & (1 << bit)]
 
 
 # ---------------------------------------------------------------------------
@@ -998,8 +1142,13 @@ class KeycodeBorrower:
 
     def borrow(self, keysym: int, busy: Collection[int] = ()) -> int | None:
         if keysym in self._borrowed:
-            self._borrowed.move_to_end(keysym)
-            return self._borrowed[keysym]
+            keycode = self._borrowed[keysym]
+            if keysym in self.kmap.syms(keycode):
+                self._borrowed.move_to_end(keysym)
+                return keycode
+            # Another client reloaded the keymap and the keycode lost the
+            # keysym (or holds another one now): map it afresh.
+            del self._borrowed[keysym]
         spare = self.kmap.spare_keycodes()
         if spare:
             keycode = spare[0]
@@ -1014,6 +1163,16 @@ class KeycodeBorrower:
         self.kmap.set_row(keycode, row)
         self._borrowed[keysym] = keycode
         return keycode
+
+    def forget_stale(self) -> None:
+        """Drop borrows whose keycode no longer holds the keysym in ``kmap``.
+
+        Called after a keymap reload; restoring such a keycode would clear
+        whatever another client put there.
+        """
+        for keysym, keycode in list(self._borrowed.items()):
+            if keysym not in self.kmap.syms(keycode):
+                del self._borrowed[keysym]
 
     def restore_all(self) -> None:
         if not self._borrowed:

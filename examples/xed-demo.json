@@ -3,7 +3,7 @@
   "path_mode": "recorded",
   "rows": [
     {"comment": "Bring up the text editor, starting it if needed",
-     "events": [{"type": "window_focus", "window": "xed", "launch": "xed",
+     "events": [{"type": "window_focus", "window": " - xed$", "match_mode": "regex", "launch": "xed",
                  "rect": [200, 120, 800, 600], "client_rect": [200, 150, 800, 570]}]},
     {"comment": "Click into the document",
      "events": [{"type": "mouse_click", "x": 600, "y": 400}]},

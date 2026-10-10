@@ -258,7 +258,14 @@ def param_problems(field: FieldSpec, params: Mapping[str, Any]) -> list[str]:
         value = params[field.key]
         if value is not None and not isinstance(value, str):
             out.append("%s must be a label or null, not %s" % (field.key, _describe(value)))
-    elif kind != FieldKind.INFO:
+    elif kind == FieldKind.INFO:
+        # The catalogue's INFO fields hold recorded rectangles: null or
+        # [x, y, width, height].
+        value = params[field.key]
+        if value is not None and not (isinstance(value, tuple) and len(value) == 4
+                                      and all(is_number(v) for v in value)):
+            out.append("%s must be null or a list of 4 numbers, not %s" % (field.key, _describe(value)))
+    else:
         value = params[field.key]
         if not isinstance(value, str) and not (value is None and field.default is None):
             out.append("%s must be text, not %s" % (field.key, _describe(value)))

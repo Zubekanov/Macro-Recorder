@@ -33,7 +33,8 @@ def _path_layout(row: Row) -> tuple[FieldSpec, ...]:
         coord_pair("x", "y", "Start", allow_expr=False, help="Editing moves every point"),
         FieldSpec(keys=("end",), label="End", kind=FieldKind.INFO),
         FieldSpec(keys=("points",), label="Points", kind=FieldKind.INFO),
-        duration("duration_ms", "Duration", 0, allow_expr=False, help="Editing rescales the path"),
+        FieldSpec(keys=("duration_ms",), label="Duration", kind=FieldKind.DURATION, default=0,
+                  minimum=1, allow_expr=False, help="Editing rescales the path"),
     )
 
 
@@ -58,9 +59,14 @@ def _path_write(row: Row, values: Mapping[str, Any]) -> Row:
         events = [e.with_params(x=type(e["x"])(e["x"] + dx), y=type(e["y"])(e["y"] + dy)) for e in events]
     new_ms = values.get("duration_ms")
     old_ms = row.span_s * 1000
-    if new_ms is not None and old_ms > 0 and float(new_ms) != old_ms:
-        scale = float(new_ms) / old_ms
-        events = [e.with_dt(e.dt * scale) for e in events]
+    if new_ms is not None and float(new_ms) != old_ms:
+        if old_ms > 0:
+            scale = float(new_ms) / old_ms
+            events = [e.with_dt(e.dt * scale) for e in events]
+        else:
+            # No timing left to scale: spread the new duration evenly.
+            step = float(new_ms) / 1000 / (len(events) - 1)
+            events = [events[0]] + [e.with_dt(step) for e in events[1:]]
     return replace(row, events=tuple(events))
 
 

@@ -447,3 +447,167 @@ def test_open_settings_dialog_without_a_router_saves_atomically(rig, tmp_path, m
     loaded = settings_module.load_settings()
     assert loaded == settings
     assert not list(tmp_path.glob("macro-recorder/.settings-*"))
+
+
+# ------------------------------------------------------------------ final review fixes
+
+def test_drop_in_the_heading_of_a_scrolled_table_goes_before_the_first_visible_row(rig):
+    show(rig)
+    w = rig.window
+    tree = w.table.tree
+    w.document.append([wait_row(i) for i in range(1, 81)])
+    w.root.update()
+    tree.yview_moveto(0.5)
+    w.root.update()
+    index = {str(r.id): n for n, r in enumerate(w.document.rows)}
+    first, last = w.table._visible_rows(index)
+    assert index[first] > 0 and index[last] < 79
+    position, _line = w.table._drop_at(2)                       # in the heading
+    assert position == index[first]
+    position, _line = w.table._drop_at(tree.winfo_height() + 60)  # well below the table
+    assert position == index[last] + 1
+
+
+def test_context_menu_keeps_its_grab(rig, monkeypatch):
+    show(rig)
+    w = rig.window
+    w.document.append([wait_row(1)])
+    w.root.update()
+    menu = w.table._context_menu
+    posted = []
+    monkeypatch.setattr(menu, "tk_popup", lambda x, y: posted.append((x, y)))
+    monkeypatch.setattr(menu, "grab_release", lambda: pytest.fail("the menu grab was released"))
+    tree = w.table.tree
+    x, y, width, height = tree.bbox(str(w.document.rows[0].id))
+    tree.event_generate("<Button-3>", x=x + 5, y=y + height // 2, rootx=50, rooty=60)
+    w.root.update()
+    assert posted
+
+
+def test_choosers_count_as_modal(rig, monkeypatch, tmp_path):
+    from macro_recorder.gui import dialogs, fields
+    w = rig.window
+    seen = []
+    monkeypatch.setattr(fields.filedialog, "askopenfilename",
+                        lambda **kw: seen.append(dialogs.modal_active()) or "")
+    monkeypatch.setattr(fields.colorchooser, "askcolor",
+                        lambda **kw: seen.append(dialogs.modal_active()) or (None, None))
+    rows = w.document.append([make_row(make("match_image")), make_row(make("exec_program")),
+                              make_row(make("wait_pixel"))])
+    for row_id, key in zip(rows, ("image_path", "command", "colour")):
+        select(rig, row_id)
+        widget = field(w.details, key)
+        (widget._browse if key != "colour" else widget._choose)()
+    assert seen == [True, True, True]
+    assert not dialogs.modal_active()
+
+
+def test_typed_inline_comment_counts_before_the_unsaved_prompt(rig):
+    w = rig.window
+    (row_id,) = w.document.append([wait_row(1)])
+    w.document.mark_saved()
+    w.root.update()
+    w.table.begin_comment_edit(row_id)
+    w.root.update()
+    w.table._editor.var.set("typed but not committed")
+    rig.unsaved_answer = "cancel"
+    assert w.commands.run("file.new")
+    assert rig.prompts                               # the typed text made it dirty
+    assert w.document.row(row_id).comment == "typed but not committed"
+
+
+def test_return_presses_the_focused_dialog_button(rig):
+    from macro_recorder.gui.dialogs import _ButtonDialog
+    show(rig)
+    root = rig.window.root
+    answers = []
+    dialog = _ButtonDialog(root, "Unsaved", "Save?", [("Save", "save"), ("Don't save", "discard"),
+                                                       ("Cancel", "cancel")], answers.append)
+    dialog.wait_visibility()
+    dialog.buttons["discard"].focus_force()
+    root.update()
+    dialog.event_generate("<Return>")
+    root.update()
+    assert answers == ["discard"]
+    dialog = _ButtonDialog(root, "Unsaved", "Save?", [("Save", "save"), ("Cancel", "cancel")],
+                           answers.append)
+    dialog.wait_visibility()
+    dialog.focus_force()
+    root.update()
+    dialog.event_generate("<Return>")
+    root.update()
+    assert answers == ["discard", "save"]           # no button focused: the first
+
+
+def test_save_as_to_another_folder_updates_the_details_folder(rig, tmp_path):
+    w = rig.window
+    (row_id,) = w.document.append([make_row(make("match_image"))])
+    first, second = tmp_path / "a", tmp_path / "b"
+    first.mkdir()
+    second.mkdir()
+    assert w._write(str(first / "m.json"))
+    select(rig, row_id)
+    assert w.details._context.document_dir == str(first)
+    assert w._write(str(second / "m.json"))
+    assert w.details._context.document_dir == str(second)
+
+
+def test_saved_log_height_is_restored_and_kept():
+    settings = Settings()
+    settings.ui.geometry = "1200x720"
+    settings.ui.log_height = 300
+    shell = make_rig(settings)
+    w = shell.window
+    try:
+        show(shell)
+        shell.run_until(lambda: w._log_placed)
+        w.root.update()
+        assert abs(w.main_pane.winfo_height() - w.main_pane.sashpos(0) - 300) <= 8
+    finally:
+        w.close()
+    assert abs(settings.ui.log_height - 300) <= 8
+
+
+def test_log_height_is_not_overwritten_when_never_shown():
+    settings = Settings()
+    settings.ui.log_height = 300
+    shell = make_rig(settings)
+    shell.window.close()                            # never mapped
+    assert settings.ui.log_height == 300
+
+
+def test_hidden_log_follows_new_lines_once_shown():
+    settings = Settings()
+    settings.ui.log_visible = False
+    shell = make_rig(settings)
+    w = shell.window
+    try:
+        show(shell)
+        w.log_panel.append(["line %d" % i for i in range(40)])
+        w.root.update()
+        w.commands.run("view.log")
+        shell.run_until(lambda: w.log_panel._text.winfo_ismapped())
+        w.root.update()
+        assert w.log_panel._text.yview()[1] == 1.0
+        w.log_panel.append(["newest"])
+        w.root.update()
+        assert w.log_panel._text.yview()[1] == 1.0
+        w.log_panel._scroll("moveto", 0)            # the user scrolls up: stop following
+        w.log_panel.append(["later"])
+        w.root.update()
+        assert w.log_panel._text.yview()[0] == 0.0
+    finally:
+        w.close()
+
+
+def test_f8_toggles_the_breakpoint_while_paused(rig):
+    show(rig)
+    w = rig.window
+    (first, _second) = w.document.append([wait_row(1, breakpoint=True), wait_row(1)])
+    assert w.commands.run("play.play")
+    rig.run_until(lambda: w.mode is Mode.PAUSED)
+    w.table.tree.event_generate("<F8>")
+    w.root.update()
+    assert not w.document.row(first).breakpoint
+    assert w.commands.run("play.stop")
+    rig.run_until(lambda: w.mode is Mode.IDLE)

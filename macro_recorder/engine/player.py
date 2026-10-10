@@ -219,6 +219,8 @@ class Player:
         self._missing: set[int] = set()
         self._held_keys: list[str] = []         # one entry per hold, so holds nest
         self._held_buttons: list[str] = []
+        # Pointer and client origin when held input was released for a pause.
+        self._held_at: tuple[tuple[int, int], tuple[int, int] | None] | None = None
         self._children: list[subprocess.Popen] = []     # unwaited exec_program commands
         self._start = 0.0
         self._paused_s = 0.0
@@ -259,7 +261,10 @@ class Player:
                 log.exception("Releasing held input failed")
             self._held_keys.clear()
             self._held_buttons.clear()
-            if self._children:
+            # Programs started without Wait for exit outlive a run that
+            # reaches its end, as launched windows do; a stop or an abort
+            # ends their process groups.
+            if self._children and (error is not None or self._stop.is_set()):
                 try:
                     processes.terminate(self._children)
                 except Exception:   # noqa: BLE001
@@ -288,6 +293,11 @@ class Player:
 
     def _run(self) -> None:
         repeat = int(self.settings.playback.repeat)
+        if not any(self._plays):
+            # Every row disabled or filtered: a pass would do nothing, and
+            # with Repeat 0 the loop would spin without ever sleeping.
+            self._host.on_log("No row plays: every row is disabled or filtered")
+            return
         while not self._stop.is_set():
             self._iteration += 1
             self._row_states.clear()
@@ -571,8 +581,12 @@ class Player:
 
     def _pause(self, row: Row) -> bool:
         """Pause at a breakpoint until resumed.  True when stopped meanwhile."""
-        self._release_held()
+        # Clear first and then look at the stop flag, so a stop that landed
+        # since the last check is not erased by the clear.
         self._resume.clear()
+        if self._stop.is_set():
+            return True
+        self._release_held()
         started = self._clock.now()
         self._host.on_paused(row.id, self.variables.snapshot())
         self._resume.wait()
@@ -596,7 +610,16 @@ class Player:
         return answer
 
     def _release_held(self) -> None:
-        """Release held buttons and keys but remember them."""
+        """Release held buttons and keys but remember them.
+
+        With a button held, the pointer position (and the context window's
+        client origin) is remembered too, so the button goes down again where
+        it was released rather than wherever the user left the pointer.
+        """
+        self._held_at = None
+        if self._held_buttons:
+            origin = self._context.window.client_rect if self._context is not None else None
+            self._held_at = (self.input.position(), (origin.left, origin.top) if origin else None)
         for b in dict.fromkeys(self._held_buttons):
             self.input.release_button(b)
         for k in dict.fromkeys(self._held_keys):
@@ -604,6 +627,14 @@ class Player:
 
     def _restore_after_interruption(self) -> None:
         self.reactivate_context()
+        if self._held_at is not None and self._held_buttons:
+            (x, y), origin = self._held_at
+            if origin is not None and self._context is not None:
+                # The window may have moved while paused: follow its client area.
+                x += self._context.window.client_rect.left - origin[0]
+                y += self._context.window.client_rect.top - origin[1]
+            self.input.move(x, y)
+        self._held_at = None
         for k in dict.fromkeys(self._held_keys):
             self.input.press_key(k)
         for b in dict.fromkeys(self._held_buttons):

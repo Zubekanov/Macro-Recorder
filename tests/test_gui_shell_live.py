@@ -327,8 +327,8 @@ def test_paste_round_trip(shell):
     w.table.select([ids[1]])
     w.commands.run("edit.paste")
     assert len(w.document.rows) == 4
-    assert w.document.rows[2].label == ""          # duplicate label cleared
-    assert "already used" in w.log_panel.text()
+    assert w.document.rows[2].label == "a 2"       # duplicate label renamed
+    assert "renamed to 'a 2'" in w.log_panel.text()
 
 
 def test_toplevels_register_in_own_windows(shell):

@@ -200,6 +200,92 @@ def test_type_char_without_level3_borrows_instead(displays, monkeypatch):
         inj.close()
 
 
+GROUP_2 = 1 << 13
+
+
+@pytest.mark.parametrize("char, state, expected", [
+    ("a", GROUP_2, taps(38)),                       # group 2 of key 38 still holds a
+    ("\u044b", GROUP_2, taps(39)),                  # Cyrillic yeru is typed in the active group
+    ("\u042b", GROUP_2, taps(SHIFT, 39)),
+    ("s", GROUP_2, taps(8)),                        # s is not in group 2: borrowed
+    ("\u044b", 0, taps(8)),                         # yeru is not in group 1: borrowed
+])
+def test_type_char_follows_the_active_group(injector, displays, char, state, expected):
+    displays[0].pointer.mask = state
+    injector.type_char(char)
+    assert injector.keys == expected
+
+
+def test_caps_lock_adds_shift_only_to_a_case_pair(displays, monkeypatch):
+    # French AZERTY: AE02 is [eacute, 2], so Shift would type "2".
+    KeymapSource(make_kmap(FAKE_ROWS | {11: ["eacute", "2"]})).install(monkeypatch)
+    monkeypatch.setattr(x11, "has_xtest", lambda d: True)
+    keys = []
+    monkeypatch.setattr(x11, "fake_key", lambda d, keycode, press: keys.append((keycode, press)))
+    inj = XTestInput()
+    try:
+        displays[0].pointer.mask = X.LockMask
+        inj.type_char("\u00e9")
+        inj.type_char("a")
+        assert keys == taps(11) + taps(SHIFT, 38)
+    finally:
+        inj.close()
+
+
+@pytest.mark.parametrize("name, state, expected", [
+    ("KP_1", 0, [(SHIFT, True), (87, True), (SHIFT, False)]),      # Num Lock off: Shift picks KP_1
+    ("KP_1", NUM_LOCK, [(87, True)]),
+    ("KP_End", NUM_LOCK, [(SHIFT, True), (87, True), (SHIFT, False)]),
+    ("KP_End", 0, [(87, True)]),
+    ("A", 0, [(SHIFT, True), (38, True), (SHIFT, False)]),        # recorded with Caps Lock on
+    ("A", X.LockMask, [(38, True)]),
+    ("a", X.LockMask, [(38, True)]),                # combos name physical keys: no Shift
+    ("exclam", 0, [(10, True)]),                    # other keysyms stay bare, as recorded
+])
+def test_press_key_matches_the_live_lock_state(injector, displays, name, state, expected):
+    displays[0].pointer.mask = state
+    injector.press_key(name)
+    assert injector.keys == expected
+    displays[0].pointer.mask = 0
+    injector.release_key(name)
+    (keycode,) = [k for k, _ in expected if k != SHIFT]
+    assert injector.keys[-1] == (keycode, False)    # the keycode that was pressed
+
+
+def test_press_key_keeps_a_held_shift_and_releases_the_pressed_keycode(injector, displays):
+    injector.press_key("Shift_L")
+    injector.press_key("KP_1")
+    assert injector.keys == [(SHIFT, True), (87, True)]
+    injector.release_key("KP_1")
+    assert injector.keys[-1] == (87, False)
+
+
+def test_borrow_is_mapped_again_after_another_client_reloads_the_keymap(injector, displays, keymap):
+    injector.type_char("\u0436")                    # borrowed on spare keycode 8
+    assert injector.keys == taps(8)
+    keymap.current = make_kmap(FAKE_ROWS | {8: ["b"]})      # another client took keycode 8
+    displays[0].events.append(ev(X.MappingNotify, request=X.MappingKeyboard))
+    injector.keys.clear()
+    injector.type_char("\u0436")
+    assert injector.keys == taps(11)                # mapped afresh on the next spare keycode
+    assert displays[0].keymap_changes[-1][0] == 11
+    injector.release_all()
+    assert [kc for kc, rows in displays[0].keymap_changes if rows[0][0] == 0] == [11]
+
+
+def test_borrowed_keycodes_are_restored_after_a_pause(injector, displays, monkeypatch):
+    order = []
+    monkeypatch.setattr(xinput_mod.time, "sleep", lambda s: order.append(("sleep", s)))
+    displays[0].change_keyboard_mapping = lambda keycode, rows: order.append(("map", keycode, rows[0][0]))
+    injector.type_char("\u0436")
+    injector.release_all()
+    assert order == [("map", 8, 0x01000436), ("sleep", xinput_mod.BORROW_RESTORE_DELAY_S), ("map", 8, 0)]
+    assert xinput_mod.BORROW_RESTORE_DELAY_S >= 0.1
+    order.clear()
+    injector.release_all()                          # nothing borrowed: no pause
+    assert order == []
+
+
 def test_every_synthetic_press_is_noted(injector):
     injector.type_char("A")
     assert injector.synthetic.count(SHIFT) == 1 and injector.synthetic.count(38) == 1
@@ -395,6 +481,18 @@ def test_space_while_a_button_is_held_does_nothing(capture):
     assert run_capture(capture) == (1, 2, "#010200")
 
 
+def test_wheel_notches_do_not_capture(capture):
+    capture.events.extend([
+        ev(X.ButtonPress, detail=4, root_x=50, root_y=60),
+        ev(X.ButtonRelease, detail=4),
+        ev(X.ButtonPress, detail=7, root_x=51, root_y=61),
+        ev(X.ButtonRelease, detail=7),
+        ev(X.ButtonPress, detail=1, root_x=10, root_y=20),
+        ev(X.ButtonRelease, detail=1),
+    ])
+    assert run_capture(capture) == (10, 20, "#0a1400")
+
+
 def test_cancel_check_and_timeout(capture):
     capture.events.append(ev(X.ButtonPress, detail=1, root_x=1, root_y=2))
     assert run_capture(capture, cancel=lambda: True) is None
@@ -475,6 +573,15 @@ class FakeDesktop:
         monkeypatch.setattr(x11, "set_maximised", self._maximise)
         monkeypatch.setattr(x11, "active_window_id", lambda d: self._tick() or self.active)
         monkeypatch.setattr(x11, "read_window", self._read)
+        self.transient_for: dict[int, int] = {}         # dialog -> parent
+        monkeypatch.setattr(x11, "transient_reaches", self._reaches)
+
+    def _reaches(self, d, xid, target):
+        while xid in self.transient_for:
+            xid = self.transient_for[xid]
+            if xid == target:
+                return True
+        return False
 
     @staticmethod
     def _info(xid, rect, desktop=0, maximised=False):
@@ -533,6 +640,15 @@ def test_activate_gives_up_when_the_window_manager_refuses(desk, wm, monkeypatch
     monkeypatch.setattr(x11, "activate", lambda d, xid, desktop, t: None)
     assert wm.activate(desk.windows[2], settle_ms=300) is None
     assert 0.3 <= wm._clock.t < 0.4
+
+
+def test_activate_succeeds_when_the_window_manager_focuses_its_modal_dialog(desk, wm, monkeypatch):
+    desk.windows[3] = desk._info(3, Rect(80, 80, 200, 100), desktop=1)
+    desk.transient_for[3] = 2
+    monkeypatch.setattr(x11, "activate", lambda d, xid, desktop, t: desk._later(
+        lambda: setattr(desk, "active", 3)))
+    info = wm.activate(desk.windows[2], settle_ms=1000)
+    assert info == desk.windows[2] and desk.active == 3
 
 
 def test_activate_of_a_vanished_window_returns_none(desk, wm):

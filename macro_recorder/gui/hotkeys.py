@@ -31,6 +31,8 @@ log = logging.getLogger(__name__)
 
 RECORD_STOP_KEY = "F6"
 PLAY_STOP_KEY = "Escape"
+# How long the Play combo waits for the user to let go of its keys.
+PLAY_RELEASE_TIMEOUT_S = 3.0
 
 
 @dataclass(frozen=True)
@@ -152,9 +154,14 @@ class HotkeyRouter:
 
     def _on_play(self) -> None:
         mode = self._current()
+        if mode not in ("idle", "paused"):
+            return
+        # Until the combo is released its grab swallows every key event,
+        # synthetic ones included, so playback would lose its first keys.
+        self._grabber.wait_keys_released(PLAY_RELEASE_TIMEOUT_S)
         if mode == "idle":
             self._actions.play()
-        elif mode == "paused":
+        else:
             self._actions.resume()
 
     def _on_stop_key(self) -> None:

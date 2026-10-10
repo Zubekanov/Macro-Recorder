@@ -125,15 +125,22 @@ def row_tags(row: Row, group: int | None, filtered: bool) -> tuple[str, ...]:
     return tuple(tags)
 
 
-def drop_position(count: int, hovered: int | None, upper_half: bool, above_first: bool) -> int:
+def drop_position(count: int, hovered: int | None, upper_half: bool, above_first: bool,
+                  visible: tuple[int, int] | None = None) -> int:
     """Insertion position in the full list for a drop.
 
-    Before the hovered row in its upper half, after it in its lower half;
-    with no hovered row, 0 above the first row and ``count`` otherwise.
+    Before the hovered row in its upper half, after it in its lower half.
+    With no hovered row the drop goes to the nearest visible edge: before
+    the first visible row when the pointer is above it, else after the last
+    visible row.  ``visible`` is ``(first, last)`` visible indexes; without
+    it the whole list counts as visible (0 above, ``count`` below).
     """
-    if hovered is None:
+    if hovered is not None:
+        return hovered if upper_half else hovered + 1
+    if visible is None or count == 0:
         return 0 if above_first else count
-    return hovered if upper_half else hovered + 1
+    first, last = visible
+    return first if above_first else last + 1
 
 
 def remaining_index(position: int, moving: Collection[int]) -> int:
@@ -523,13 +530,32 @@ class ActionTable(ttk.Frame):
             upper = y < top + height / 2
             position = drop_position(len(rows), index[hovered], upper, False)
             return position, top if upper else top + height
-        first_box = self.tree.bbox(rows[0]) if rows else ()
-        above = bool(first_box) and y < first_box[1]
-        position = drop_position(len(rows), None, False, above or not rows)
-        if position == 0:
-            return 0, first_box[1] if first_box else 0
-        last_box = self.tree.bbox(rows[-1])
-        return position, (last_box[1] + last_box[3]) if last_box else y
+        # Nothing visible under the pointer (the heading, or below the last
+        # row): drop at the nearest visible edge, not at the far end of a
+        # scrolled table.
+        first, last = self._visible_rows(index)
+        if first is None or last is None:
+            return 0, 0
+        first_box, last_box = self.tree.bbox(first), self.tree.bbox(last)
+        above = y < first_box[1]
+        position = drop_position(len(rows), None, False, above, (index[first], index[last]))
+        return position, first_box[1] if above else last_box[1] + last_box[3]
+
+    def _visible_rows(self, index: dict[str, int]) -> tuple[str | None, str | None]:
+        """The first and last document rows with a visible bounding box."""
+        height = self.tree.winfo_height()
+        first = last = None
+        for y in range(0, height, 2):
+            iid = self.tree.identify_row(y)
+            if iid in index and self.tree.bbox(iid):
+                first = iid
+                break
+        for y in range(height - 1, -1, -2):
+            iid = self.tree.identify_row(y)
+            if iid in index and self.tree.bbox(iid):
+                last = iid
+                break
+        return first, last
 
     def _on_release(self, event: tk.Event) -> str | None:
         press, position = self._press, self._drag_position
@@ -581,10 +607,9 @@ class ActionTable(ttk.Frame):
             self.tree.focus(iid)
         self.tree.focus_set()
         self._build_context_menu()
-        try:
-            self._context_menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            self._context_menu.grab_release()
+        # On X11 tk_popup returns once the menu is posted, holding a global
+        # grab that unposts the menu on a click elsewhere: no grab_release.
+        self._context_menu.tk_popup(event.x_root, event.y_root)
         return "break"
 
     def _build_context_menu(self) -> None:
@@ -644,6 +669,13 @@ class ActionTable(ttk.Frame):
         entry.focus_set()
         entry.select_range(0, "end")
         entry.icursor("end")
+
+    def commit_inline_edit(self) -> None:
+        """Commit the open inline editor as Return would; an invalid label is
+        dropped rather than kept open.  Nothing happens when none is open."""
+        editor = self._editor
+        if editor is not None:
+            self._commit_edit(editor, keep_open_if_invalid=False)
 
     def _validate_label(self, editor: _InlineEditor) -> None:
         if self._editor is not editor:

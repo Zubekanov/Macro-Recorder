@@ -27,8 +27,15 @@ class LogPanel(ttk.Notebook):
         self._log_frame = ttk.Frame(self)
         self._text = tk.Text(self._log_frame, height=6, wrap="none", state="disabled",
                              undo=False)
-        scroll = ttk.Scrollbar(self._log_frame, orient="vertical", command=self._text.yview)
+        # Follow the end until the user scrolls away from it.  Decided by the
+        # user's scrolling only: a hidden or resized Text is not "at the end"
+        # by its own yview, yet should keep following.
+        self._follow = True
+        scroll = ttk.Scrollbar(self._log_frame, orient="vertical", command=self._scroll)
         self._text.configure(yscrollcommand=scroll.set)
+        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self._text.bind(sequence, lambda e: self.after_idle(self._update_follow), add="+")
+        self._text.bind("<Configure>", lambda e: self._follow and self._text.see("end"), add="+")
         clear = ttk.Button(self._log_frame, text="Clear", command=self.clear)
         self._text.grid(row=0, column=0, sticky="nsew")
         scroll.grid(row=0, column=1, sticky="ns")
@@ -58,15 +65,26 @@ class LogPanel(ttk.Notebook):
         text = "".join(line.rstrip("\n") + "\n" for line in lines)
         if not text:
             return
-        at_end = self._text.yview()[1] >= 0.999
         self._text.configure(state="normal")
         self._text.insert("end", text)
         excess = int(self._text.index("end-1c").split(".")[0]) - 1 - MAX_LOG_LINES
         if excess > 0:
             self._text.delete("1.0", "%d.0" % (excess + 1))
         self._text.configure(state="disabled")
-        if at_end:
+        if self._follow:
             self._text.see("end")
+
+    def show_end(self) -> None:
+        """Scroll to the newest line and follow new ones again."""
+        self._follow = True
+        self._text.see("end")
+
+    def _scroll(self, *args: Any) -> None:
+        self._text.yview(*args)
+        self._update_follow()
+
+    def _update_follow(self) -> None:
+        self._follow = self._text.yview()[1] >= 0.999
 
     def clear(self) -> None:
         self._text.configure(state="normal")

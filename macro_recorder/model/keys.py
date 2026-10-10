@@ -67,7 +67,9 @@ CHAR_KEYSYMS: dict[str, str] = {
     "`": "grave", "{": "braceleft", "|": "bar", "}": "braceright",
     "~": "asciitilde", "\t": "Tab", "\n": "Return", "\r": "Return",
 }
-KEYSYM_CHARS: dict[str, str] = {v: k for k, v in CHAR_KEYSYMS.items() if k not in "\t\n\r"}
+# Keysym name -> the character shown for it.  Whitespace keeps its name, so
+# the space key shows as "Space" rather than a blank.
+KEYSYM_CHARS: dict[str, str] = {v: k for k, v in CHAR_KEYSYMS.items() if k not in " \t\n\r"}
 
 
 def is_modifier(name: str) -> bool:
@@ -136,6 +138,8 @@ def display_key(name: str) -> str:
         return _MODIFIER_DISPLAY[name]
     if name in KEYSYM_CHARS:
         return KEYSYM_CHARS[name]
+    if name == "space":
+        return "Space"
     if len(name) == 1:
         return name.upper()
     return name.replace("_", " ")

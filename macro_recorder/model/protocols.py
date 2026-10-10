@@ -152,6 +152,13 @@ class HotkeyGrabber(Protocol):
         """Release every grab, remembering the combos (for the Settings dialog)."""
     def resume(self) -> list[str]:
         """Re-grab the remembered combos; returns the ones the server refused."""
+    def wait_keys_released(self, timeout_s: float) -> bool:
+        """Block until no key is down, up to ``timeout_s``; False on timeout.
+
+        Called from a callback before playback sends input: while the grabbed
+        key is held the server gives every key event, XTest ones included,
+        to the grabbing connection.
+        """
     def close(self) -> None: ...
 
 

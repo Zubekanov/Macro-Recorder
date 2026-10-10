@@ -38,12 +38,13 @@ def test_exec_wait_stores_exit_code(ctx, code):
     assert bool(ctx.logs) == (code != 0)
 
 
-def test_exec_wait_timeout_is_logged(ctx):
+def test_exec_wait_timeout_is_logged_and_stores_minus_one(ctx):
     ctx.exit_code = None
+    ctx.variables["rc"] = 0                 # from an earlier pass that succeeded
     r = row("exec_program", command="sleep 9", wait_exit=True, timeout_ms=100, var_name="rc")
     assert play(ctx, r) is Flow.NEXT
     assert ctx.logs == ["sleep 9 did not exit within 100 ms"]
-    assert "rc" not in ctx.variables
+    assert ctx.variables["rc"] == -1
 
 
 def test_exec_wait_stopped(ctx):

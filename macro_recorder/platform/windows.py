@@ -88,13 +88,57 @@ def settle(read: Callable[[], T], accept: Callable[[T], bool], settle_ms: float,
         clock.sleep(poll_s)
 
 
-def monitor_work_areas(rects: list[Rect], work: Rect | None) -> list[Monitor]:
-    """Monitors numbered from 1, each work area clipped from _NET_WORKAREA."""
+def monitor_work_areas(rects: list[Rect], work: Rect | None,
+                       gtk_areas: list[Rect] | None = None,
+                       struts: list[Rect] | None = None) -> list[Monitor]:
+    """Monitors numbered from 1, each with its own work area.
+
+    The window manager's per-monitor areas (``_GTK_WORKAREAS_D<n>``, which
+    Muffin and Mutter publish) win: each monitor takes the one overlapping it
+    most.  Without them, panel struts (``_NET_WM_STRUT_PARTIAL`` rectangles
+    in root coordinates) are cut from each monitor they touch.  Only when
+    neither is known is the single ``_NET_WORKAREA`` intersected with each
+    monitor, which is wrong when a panel sits on one monitor only.
+    """
     monitors = []
     for i, rect in enumerate(rects, start=1):
-        area = x11.intersect(rect, work) if work is not None else None
+        area = None
+        if gtk_areas:
+            best = max(gtk_areas, key=lambda a: _overlap(rect, a))
+            area = x11.intersect(rect, best)
+        elif struts:
+            area = _cut_struts(rect, struts)
+        elif work is not None:
+            area = x11.intersect(rect, work)
         monitors.append(Monitor(i, rect, area or rect))
     return monitors
+
+
+def _overlap(a: Rect, b: Rect) -> int:
+    common = x11.intersect(a, b)
+    return common.width * common.height if common is not None else 0
+
+
+def _cut_struts(monitor: Rect, struts: list[Rect]) -> Rect | None:
+    """``monitor`` less every strut that touches it, each cut from its nearest edge."""
+    left, top, right, bottom = monitor.left, monitor.top, monitor.right, monitor.bottom
+    for strut in struts:
+        if x11.intersect(monitor, strut) is None:
+            continue
+        gaps = {"left": strut.right - monitor.left, "right": monitor.right - strut.left,
+                "top": strut.bottom - monitor.top, "bottom": monitor.bottom - strut.top}
+        side = min(gaps, key=lambda k: gaps[k])
+        if side == "left":
+            left = max(left, strut.right)
+        elif side == "right":
+            right = min(right, strut.left)
+        elif side == "top":
+            top = max(top, strut.bottom)
+        else:
+            bottom = min(bottom, strut.top)
+    if right <= left or bottom <= top:
+        return None
+    return Rect(left, top, right - left, bottom - top)
 
 
 # ---------------------------------------------------------------------------
@@ -169,8 +213,15 @@ class X11WindowManager:
         return self._call(lambda d: x11.read_window(d, window.id, require_title=False), None)
 
     def _snapshot(self, xid: int) -> tuple[int | None, WindowInfo | None]:
-        return self._call(lambda d: (x11.active_window_id(d),
-                                     x11.read_window(d, xid, require_title=False)), (None, None))
+        """``(focus, info)``: ``focus`` is ``xid`` when the window or a dialog
+        transient for it is active, else the active id."""
+        def read(d):
+            active = x11.active_window_id(d)
+            if active is not None and active != xid and x11.transient_reaches(d, active, xid):
+                log.debug("Activating %#x focused its dialog %#x", xid, active)
+                active = xid
+            return active, x11.read_window(d, xid, require_title=False)
+        return self._call(read, (None, None))
 
     # -- actions ------------------------------------------------------------
 
@@ -246,7 +297,8 @@ class X11WindowManager:
             if not rects:
                 w, h = x11.screen_size(d)
                 rects = [Rect(0, 0, w, h)]
-            return monitor_work_areas(rects, x11.work_area(d))
+            return monitor_work_areas(rects, x11.work_area(d), x11.gtk_work_areas(d),
+                                      x11.panel_struts(d))
         return self._call(read, [])
 
     def bell(self) -> None:

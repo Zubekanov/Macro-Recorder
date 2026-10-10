@@ -43,7 +43,7 @@ work packages, their file ownership and what is out of scope.
 | `macro_recorder/engine/recorder.py` | Drives the platform listener into a raw event stream with own-window filtering. |
 | `macro_recorder/engine/paths.py` | Pure path generators: linear, spline, natural. |
 | `macro_recorder/engine/screen.py` | Screen capture (mss), image find (OpenCV), pixel read, OCR (Tesseract). |
-| `macro_recorder/engine/processes.py` | Runs launch and exec_program commands, reaps children. `run` returns the exit code, None when stopped, and raises `ProcessTimeout` when `timeout_ms` passes (the group is killed first) or `ProcessError` when the command cannot start. |
+| `macro_recorder/engine/processes.py` | Runs launch and exec_program commands, reaps children. `run` returns the exit code, None when stopped, and raises `ProcessTimeout` when `timeout_ms` passes (the group is killed first) or `ProcessError` when the command cannot start. An unwaited child is reaped by a daemon thread and dropped from the caller's list once its process group is gone, so `terminate` never signals a reused number. |
 | `macro_recorder/platform/session.py` | X11 vs Wayland detection, server time, own-window registry. |
 | `macro_recorder/platform/x11.py` | python-xlib helpers: EWMH, geometry, activation, workspaces, SHAPE, XTest, XRecord, XInput2 raw events, XGrabKey. |
 | `macro_recorder/platform/windows.py` | `WindowManager` on one locked display connection; a `NullWindowManager`. |
@@ -102,11 +102,14 @@ class Row:
   or "End". Renaming a label rewrites every target that used it in the same
   undo step. Clearing a label that rows jump to is refused (`replace_row`
   and `rename_label` raise ValueError naming those rows; `rename_problem`
-  gives the same text for live validation). Paste clears a label that already exists and logs it.
+  gives the same text for live validation). Paste renames a label that
+  already exists to the first free `<label> 2`, `<label> 3`... and
+  retargets the pasted rows that jump to it, clears an invalid label, and
+  logs either.
 - `MacroDocument` holds `rows: tuple[Row, ...]`, `filter`, `path_mode`, a
   revision counter and `saved_revision` (dirty means they differ), and the
   undo stack. Operations: `insert(index, rows)`, `delete(ids)`,
-  `move(ids, index)`, `replace_row(row)`, `split(id)`, `set_enabled(ids,
+  `move(ids, index)`, `replace_row(row)`, `split(ids)`, `set_enabled(ids,
   bool)`, `set_breakpoint(ids, bool)`, `rename_label(id, label)`,
   `set_filter`, `set_path_mode`, `begin_edit(id, key)`, `end_edit()`,
   `undo()`, `redo()`, `row_index()`, `label_index()`, `subscribe(callback)`.
@@ -316,7 +319,7 @@ class ActionSpec:
 | `repeat` | Control | target; count (3) | The body is the rows from `target` to this row. On reaching the row the counter increments; if counter < count it jumps to target, else it resets to 0 and falls through. `count` is read when the counter is 0; count <= 1 falls through. Counters reset at each program pass. `target` must be at or above the row. The dynamic value `loop` is the innermost active repeat's pass. Preset: Repeat. |
 | `match_image` | Find | image_path (FILE); region; confidence (0.9, 0..1); timeout_ms (5000); var_name ("found"); capture_var, capture_var_y; click_found (false); on_timeout (continue; abort, goto); target | Poll every 300 ms until the template is found. Sets var_name 0/1, the centre into the capture vars (frame applied), clicks the centre when asked. |
 | `match_text` | Find | expr (TEMPLATE); region; similarity (0.8); timeout_ms; var_name; capture_var; on_timeout; target | As above with OCR text compared by normalised Levenshtein similarity. |
-| `exec_program` | Misc | command (COMMAND, template; each `{expr}` is shell-quoted); wait_exit (false); timeout_ms (0 = none); var_name (exit code) | Run through `/bin/sh` with cwd = the macro's folder or `$HOME`, `VIRTUAL_ENV` removed, the venv stripped from `PATH`, `start_new_session`. Launch failure aborts; a non-zero exit is logged. Stop kills the process group. Preset: Run program. |
+| `exec_program` | Misc | command (COMMAND, template; each `{expr}` is shell-quoted); wait_exit (false); timeout_ms (0 = none); var_name (exit code) | Run through `/bin/sh` with cwd = the macro's folder or `$HOME`, `VIRTUAL_ENV` removed, the venv stripped from `PATH`, `start_new_session`. Launch failure aborts; a non-zero exit is logged; a timeout is logged and stores -1 in the exit-code variable. A stop or an abort kills the process group of every program started without Wait for exit; when playback reaches its end they keep running. Preset: Run program. |
 | `message_box` | Misc | title (""); text (TEMPLATE); buttons (ok; ok_cancel, yes_no); target_ok, target_cancel, target_yes, target_no (LABEL_TARGET, none = next row, Cancel defaults to End); var_name | `host.ask` blocks until answered. Esc anywhere stops playback. Closing the dialog counts as Cancel or No. |
 | `notify` | Misc | text (TEMPLATE) | `notify-send`; logged if unavailable. |
 | `beep` | Misc | none | XBell through the window manager's connection. |
@@ -325,7 +328,8 @@ class ActionSpec:
 
 Grammar: numbers, `'strings'`, variable names, `+ - * / // % **` (exponent
 capped at 1000), comparisons (chained), `and`, `or`, `not`, parentheses and
-the functions `abs round floor ceil min max int str len rnd(a, b)`. Truth is
+the functions `abs round floor ceil min max int str len rnd(a, b)`
+(round's digit count capped at 1000 either way). Truth is
 a non-zero number or a non-empty string. Any evaluation error aborts
 playback with "Row N: message". `{expr}` segments in templates render with
 `str()`; `{{` and `}}` are literal braces.
@@ -359,15 +363,19 @@ Dynamic values, read-only: `rt_ms` (playback time excluding pauses),
   key and button and remembers them, posts `on_paused(row id, variables)`,
   and blocks until `resume()` or `stop()`. On resume it re-activates the
   context window (no launch, no move) and waits for confirmation, re-presses
-  the remembered keys and buttons, and resets the schedule clock. The same
+  the remembered keys and buttons (moving the pointer back to where a held
+  button was released, following the context window if it moved), and
+  resets the schedule clock. The same
   happens when `ctx.host.ask` returns: the engine wraps the host, so an
   action that asks does not call `reactivate_context` itself. Paused time is
   excluded from `rt_ms`.
-- Repeat count applies to the whole program; 0 repeats until stopped.
+- Repeat count applies to the whole program; 0 repeats until stopped. A
+  program in which no row plays ends at once with a log line.
 - There is no step limit. A run of more than 10 000 rows without a wait in
   one second sleeps 1 ms per row so Esc stays responsive.
 - `stop()` sets the stop flag and every wait event, including the pause
-  event and any pending `ask`. The player always releases held keys and
+  event and any pending `ask`. A stop that lands just before a breakpoint
+  ends the run instead of pausing. The player always releases held keys and
   buttons on exit and always calls `on_finished(error)` last.
 
 `PlayerHost` Protocol: `on_row(row_id)`, `on_log(line)`,
@@ -385,7 +393,9 @@ uses `zenity` when present and otherwise answers the first button and logs it.
   sticky, then `_NET_ACTIVE_WINDOW` with source indication 2 and the server
   time (from a PropertyNotify on the manager's own window). Then poll
   `_NET_ACTIVE_WINDOW` and the geometry every 50 ms until two reads agree
-  or `window_settle_ms` (1000) passes. Failure counts as missing.
+  or `window_settle_ms` (1000) passes. A dialog whose `WM_TRANSIENT_FOR`
+  chain leads to the window counts as the window being active (Muffin
+  focuses a window's modal dialog instead). Failure counts as missing.
 - Restore: when the recorded state was maximised the engine sets that state
   and does not move. Otherwise, when `restore_rect` resolves to yes and the
   recorded outer rect lies inside a current monitor's work area, it sends
@@ -425,16 +435,16 @@ from the active-window watcher.
 
 | Concern | Implementation |
 |---|---|
-| Session | `session.check()` refuses recording and playback when `XDG_SESSION_TYPE` is `wayland`, `WAYLAND_DISPLAY` is set, or `DISPLAY` is unset. The GUI shows a dialog and disables Record and Play; the CLI exits 2. |
-| Keys | The model stores X keysym names (`a`, `KP_1`, `Return`, `Control_L`, `F6`). Combos are `ctrl+shift+s` with aliases `ctrl`, `shift`, `alt`, `super` and are shown as `Ctrl+Shift+S` (a Details key field shows the stored form when the shown form would parse back to a different value, such as `ctrl+S`; letters in a typed combination are stored in lower case). A lone `+` and a trailing `++` (`ctrl++`) are the plus key; a single trailing `+` (`ctrl+`) leaves the key out and is an error. `input.py` converts a name to a keycode with `keysym_to_keycode`, borrowing a spare keycode for unmapped keysyms and restoring it after. A `live_x` test resolves every name in the table. |
+| Session | `session.check()` refuses recording and playback when `XDG_SESSION_TYPE` is `wayland`, `WAYLAND_DISPLAY` is set, or `DISPLAY` is unset. The GUI shows a dialog and disables Record and Play; the CLI exits 3 (2 is argparse's usage error). |
+| Keys | The model stores X keysym names (`a`, `KP_1`, `Return`, `Control_L`, `F6`). Combos are `ctrl+shift+s` with aliases `ctrl`, `shift`, `alt`, `super` and are shown as `Ctrl+Shift+S` (a Details key field shows the stored form when the shown form would parse back to a different value, such as `ctrl+S`; letters in a typed combination are stored in lower case). A lone `+` and a trailing `++` (`ctrl++`) are the plus key; a single trailing `+` (`ctrl+`) leaves the key out and is an error. `input.py` looks a name up in the active XKB group under the live lock state (`KeyboardMap.find_for_state`), borrowing a spare keycode for keysyms the group lacks and restoring it 150 ms after the last key event when playback ends (a borrow that another client's keymap reload overwrote is mapped afresh). `press_key` adds Shift only for a keypad keysym or an upper-case letter the live Num Lock or Caps Lock state would otherwise turn into the other level; Caps Lock adds Shift in `type_char` only on a key whose two levels are a lower and upper case pair. A `live_x` test resolves every name in the table. |
 | Injection | XTest only, through `InputBackend`: `move(x, y)`, `press_button`, `release_button`, `scroll(dx, dy)`, `press_key(name)`, `release_key(name)`, `type_text(text)`. The backend counts every synthetic key it sends, by keycode, for the stop-key fallback. |
 | Recording stream | `InputListener` on XRecord with its own two connections (one blocks in the record context, one controls it): KeyPress and KeyRelease with keycode and state mapped to a keysym name, ButtonPress, ButtonRelease and MotionNotify with root coordinates. |
 | Stop key | `StopKeyWatcher` selects `XI_RawKeyPress` on the root through XInput2 (python-xlib provides the masks; `x11.py` registers a raw event decoder with `ge_add_event_data`) and ignores events whose `sourceid` is the `Virtual core XTEST keyboard` slave. Synthetic Esc, including autorepeat of a held synthetic Esc, never counts as the user. Where XInput2 2.1 is unavailable the fallback uses XRecord and the injector's counter, ignoring Esc while the injector holds it. |
-| Global hotkeys | `HotkeyGrabber` grabs each combo on the root with `XGrabKey` in the Lock and Mod2 mask variants, so other applications do not see it. A failed grab is reported in the Settings dialog: refusals from startup when it opens, and new ones on OK, where a second OK keeps them. `Ctrl+Alt+F1..F12`, `Ctrl+Alt+Backspace` and `Ctrl+Alt+Delete` are rejected. Defaults: record toggle `Ctrl+Shift+F9`, play `Ctrl+Shift+F5`. Esc and F6 are observed, never grabbed. |
-| Windows | EWMH through one locked connection, with core-protocol fallbacks for Xvfb. `WindowManager`: `list()`, `active()`, `find(pattern, mode)`, `activate(win, settle_ms) -> WindowInfo | None`, `move(win, rect, settle_ms) -> WindowInfo | None`, `set_maximised(win, bool)`, `watch_active(callback) -> stop`, `bell()`, `monitors()`. `WindowInfo` carries id, title, outer rect, client rect, desktop, maximised. `ConnectionClosedError` drops the cached display. |
+| Global hotkeys | `HotkeyGrabber` grabs each combo on the root with `XGrabKey` in the Lock and Mod2 mask variants, so other applications do not see it. A failed grab is reported in the Settings dialog: refusals from startup when it opens, and new ones on OK, where a second OK keeps them. `Ctrl+Alt+F1..F12`, `Ctrl+Alt+Backspace` and `Ctrl+Alt+Delete` are rejected. Defaults: record toggle `Ctrl+Shift+F9`, play `Ctrl+Shift+F5`. Esc and F6 are observed, never grabbed. The Play combo waits (up to 3 s) until no key is down before it plays or continues, because the grab activated by the press sends every key event, XTest ones included, to the grabbing connection until the key is released. |
+| Windows | EWMH through one locked connection, with core-protocol fallbacks for Xvfb. `WindowManager`: `list()`, `active()`, `find(pattern, mode)`, `activate(win, settle_ms) -> WindowInfo | None`, `move(win, rect, settle_ms) -> WindowInfo | None`, `set_maximised(win, bool)`, `watch_active(callback) -> stop`, `bell()`, `monitors()`. `WindowInfo` carries id, title, outer rect, client rect, desktop, maximised. The outer rect is the visible one: the client grown by `_NET_FRAME_EXTENTS` and shrunk by a header-bar window's `_GTK_FRAME_EXTENTS` shadow. Each monitor's work area comes from `_GTK_WORKAREAS_D<n>`, else from cutting panel struts out of the monitor, else from `_NET_WORKAREA`. `ConnectionClosedError` drops the cached display. |
 | Screen | mss for capture; monitors from `sct.monitors`. Pixel reads capture a 1x1 region. |
 | Overlay | Tk override-redirect toplevel shaped to the drawn marks with an empty input region, shaped before it is mapped. Hidden while recording, playing or when the application loses focus; a shape set while unfocused is drawn when the focus returns. |
-| Targeting | Its own connection grabs pointer and keyboard on the root (`owner_events` false) and checks both replies, retrying for 500 ms then cancelling with a message. While grabbed it reads ButtonPress, ButtonRelease and KeyPress: the first press captures the point and the colour under it, the matching release ends targeting, Space captures without a click, Esc cancels. Both grabs are released in a `finally`. |
+| Targeting | Its own connection grabs pointer and keyboard on the root (`owner_events` false) and checks both replies, retrying for 500 ms then cancelling with a message. While grabbed it reads ButtonPress, ButtonRelease and KeyPress: the first button press (wheel notches are ignored) captures the point and the colour under it, the matching release ends targeting, Space captures without a click, Esc cancels. Both grabs are released in a `finally`. |
 | OCR | Tesseract via pytesseract. |
 
 ## GUI
@@ -463,8 +473,11 @@ from the active-window watcher.
   column and the Output Log show typed newlines and tabs as `\n` and `\t`. Inline label
   edits validate live. Double-click on the number column toggles the
   breakpoint. Drag drops before the hovered row's upper half or after its
-  lower half, with a line marking the position; above the first row is
-  index 0, below the last is the end.
+  lower half, with a line marking the position; with no visible row under
+  the pointer (the heading, or below the rows) it drops before the first
+  visible row or after the last visible one, so a scrolled table never
+  sends rows to its far end. The context menu keeps the grab `tk_popup`
+  takes, so a click elsewhere closes it.
 - **Highlight**: while playing, the running row gets exactly the tag
   `playing` and `>` in the number column; the previous row gets its
   computed tags back. Selection is saved on entering playing and restored
@@ -488,7 +501,7 @@ from the active-window watcher.
   breakpoint only. Global hotkeys are ignored while a modal grab is active
   or the mode is targeting.
 - **Shortcuts**: Ctrl+N/O/S, Ctrl+Shift+S, F5 (play or continue), F9
-  (record toggle) on the toplevel. Ctrl+X/C/V, Ctrl+A, Ctrl+E, F8, Delete,
+  (record toggle) and F8 (so it works while paused) on the toplevel. Ctrl+X/C/V, Ctrl+A, Ctrl+E, F8, Delete,
   Alt+Up/Down, Return (edit label), F2 (edit comment) and the preset insert
   keys on the table widget only, so Entry widgets keep text semantics.
   Ctrl+Z/Y on the toplevel, and inside an Entry they still undo the
@@ -507,8 +520,14 @@ from the active-window watcher.
   incrementally from `recorder.events_since(cursor)`; they are not in the
   document. No unsaved-changes prompt on Record.
 - **Unsaved changes**: Save / Don't save / Cancel on New, Open, a recent
-  file and Exit. Title `name* - Macro Recorder` or `Untitled - Macro
+  file and Exit. Text typed in the inline Label or Comment editor is
+  committed first (and before Save), so it counts. Return presses the
+  focused button, else Save; the same holds in the message_box dialog.
+  File and colour choosers opened from the Details panel count as modal. Title `name* - Macro Recorder` or `Untitled - Macro
   Recorder`; the name is the file stem.
+- **Output Log**: follows new lines until the user scrolls away from the
+  end, also while hidden; its saved height is placed on the first layout
+  tall enough for it and is saved on exit only once it was placed.
 - **Settings**: `$XDG_CONFIG_HOME/macro-recorder/settings.json`. Playback:
   speed, repeat, window_timeout_ms, window_settle_ms, on_missing,
   restore_rect, path_mode default, min_spacing_ms. Recording: record_paths,
@@ -534,9 +553,12 @@ from the active-window watcher.
 
 `record [output] [--stop-key F6]`, `play FILE [--speed] [--repeat]
 [--window-timeout] [--on-missing] [--no-filter] [--verbose]`, `list FILE`
-(the Value text per row, with row numbers and labels), `validate FILE` (exit
-1 with one line per problem). `list` and `validate` need no display.
-Execution errors print "Error: Row N: message" and exit 1.
+(the Value text per row, with row numbers and labels, typed newlines and
+tabs escaped so each row is one line), `validate FILE` (exit 1 with one line
+per problem). `list` and `validate` need no display. Execution errors print
+"Error: Row N: message" and exit 1. Ctrl+C, or Esc unless `--repeat 0`,
+prints "Stopped" and exits 130; no X11 session exits 3; output closed early
+exits 141 without a traceback.
 
 ## Tests
 

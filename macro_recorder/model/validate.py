@@ -10,8 +10,9 @@ marks the rows.  Warnings do not stop playback.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
-from typing import Any, Iterator, Literal, Mapping
+from typing import Any, Callable, Iterator, Literal, Mapping
 
 from macro_recorder.engine import expressions
 from macro_recorder.engine.expressions import ExpressionError
@@ -66,15 +67,23 @@ def names_assigned(document: MacroDocument) -> set[str]:
     return names
 
 
-def check(document: MacroDocument) -> list[Problem]:
-    """Every problem in the document, in row order."""
-    checker = _Checker(document)
+def check(document: MacroDocument,
+          key_known: Callable[[str], bool] | None = None) -> list[Problem]:
+    """Every problem in the document, in row order.
+
+    ``key_known`` says whether a keysym name exists (the platform layer's
+    keysym table; the model cannot import it).  When given, every key name
+    in a KEY or KEY_COMBO field is checked against it.
+    """
+    checker = _Checker(document, key_known)
     return list(checker.run())
 
 
 class _Checker:
-    def __init__(self, document: MacroDocument) -> None:
+    def __init__(self, document: MacroDocument,
+                 key_known: Callable[[str], bool] | None = None) -> None:
         self.document = document
+        self.key_known = key_known
         self.known = names_assigned(document) | DYNAMIC_NAMES
         self.label_rows: dict[str, int] = {}
         for i, row in enumerate(document.rows):
@@ -159,6 +168,12 @@ class _Checker:
         elif kind == FieldKind.TEXT:
             if (event.type, field.key) in EXPRESSION_TEXT_FIELDS:
                 yield from self._expression(field.key, params[field.key])
+            elif (event.type == EventType.WINDOW_FOCUS and field.key == "window"
+                  and params.get("match_mode") == "regex"):
+                try:
+                    re.compile(params[field.key])
+                except re.error as e:
+                    yield field.key, "%s: bad regular expression: %s" % (field.label, e), "error"
         elif kind == FieldKind.TEMPLATE:
             yield from self._template(field.key, params[field.key])
         elif kind == FieldKind.COMMAND:
@@ -269,6 +284,11 @@ class _Checker:
             return
         if single and len(names) != 1:
             yield key, "%r is a combination; this field takes one key" % value, "error"
+            return
+        if self.key_known is not None:
+            unknown = [name for name in names if not self.key_known(name)]
+            if unknown:
+                yield key, "Unknown key %s" % ", ".join(map(repr, unknown)), "error"
 
 
 def _nonzero(value: Any) -> bool:

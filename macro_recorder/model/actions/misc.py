@@ -50,6 +50,11 @@ def render_shell(ctx: PlayContext, template_text: str) -> str:
     return "".join(out)
 
 
+# Stored in the exit-code variable when Wait for exit times out, so a value
+# from an earlier pass is never mistaken for this run's result.
+TIMEOUT_EXIT_CODE = -1
+
+
 def _play_exec(ctx: PlayContext, row: Row) -> Flow | Abort:
     """Run the command; when waiting, log a non-zero exit and store the code."""
     e = row.event
@@ -75,6 +80,8 @@ def _play_exec(ctx: PlayContext, row: Row) -> Flow | Abort:
         if ctx.stopped():
             return Flow.STOP
         ctx.log("%s did not exit within %s" % (command, fmt_ms(e["timeout_ms"])))
+        if e["var_name"]:
+            ctx.variables[e["var_name"]] = TIMEOUT_EXIT_CODE
         return Flow.NEXT
     if code != 0:
         ctx.log("%s exited with code %d" % (command, code))
@@ -91,7 +98,8 @@ EXEC_PROGRAM = register(ActionSpec(
         boolean("wait_exit", "Wait for exit", False),
         duration("timeout_ms", "Timeout", 0, visible_when=lambda v: bool(v.get("wait_exit")),
                  help="0 waits forever"),
-        var_name("var_name", "Exit code variable", "", visible_when=lambda v: bool(v.get("wait_exit"))),
+        var_name("var_name", "Exit code variable", "", visible_when=lambda v: bool(v.get("wait_exit")),
+                 help="-1 when the timeout passes"),
     ),
     presets=(Preset("Run program", None, lambda: make("exec_program", command="")),),
     describe=lambda row: "run %s%s" % (row.event["command"] or "?", " and wait" if row.event["wait_exit"] else ""),

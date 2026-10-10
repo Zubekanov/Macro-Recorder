@@ -46,8 +46,8 @@ def modal() -> Iterator[None]:
 class _ButtonDialog(tk.Toplevel):
     """A small dialog: message text and a row of buttons, each with an answer.
 
-    Return picks the first button, Escape and the window's close button the
-    last.
+    Return presses the focused button, else picks the first; Escape and the
+    window's close button pick the last.
     """
 
     def __init__(self, master: tk.Misc, title: str, message: str,
@@ -73,12 +73,21 @@ class _ButtonDialog(tk.Toplevel):
             self.buttons[answer] = button
         first = buttons[0][1]
         last = buttons[-1][1]
-        self.bind("<Return>", lambda e: self.choose(first))
-        self.bind("<KP_Enter>", lambda e: self.choose(first))
+        self.bind("<Return>", lambda e: self._on_return(first))
+        self.bind("<KP_Enter>", lambda e: self._on_return(first))
         self.bind("<Escape>", lambda e: self.choose(last))
         self.protocol("WM_DELETE_WINDOW", lambda: self.choose(last))
         self.buttons[first].focus_set()
         place_over(self, master)
+
+    def _on_return(self, default: str) -> str:
+        focused = self.focus_get()
+        for answer, button in self.buttons.items():
+            if focused is button:
+                self.choose(answer)
+                return "break"
+        self.choose(default)
+        return "break"
 
     def choose(self, answer: str) -> None:
         if self._closed:

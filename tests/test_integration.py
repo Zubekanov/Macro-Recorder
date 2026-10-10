@@ -501,7 +501,8 @@ def test_breakpoint_releases_held_input_and_restores_it_on_resume():
         ("press_key", "Shift_L"),
         ("move", 300, 300), ("press_button", "left"),
         ("release_button", "left"), ("release_key", "Shift_L"),     # pause
-        ("press_key", "Shift_L"), ("press_button", "left"),         # resume
+        ("move", 300, 300),                                         # resume where released
+        ("press_key", "Shift_L"), ("press_button", "left"),
         ("type_char", "a"),
         ("release_button", "left"), ("release_key", "Shift_L"),
     ]

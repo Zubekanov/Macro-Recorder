@@ -22,6 +22,10 @@ Decisions where the design is silent:
   ``$WINDOWID`` names it, so the recording does not start by focusing the
   terminal.  Terminals that do not set ``$WINDOWID`` still get that row.
 - ``validate`` exits 0 when the file has only warnings.
+- Exit status: 0 done, 1 an error, 2 a bad command line (argparse), 3 no
+  X11 session, 130 stopped by Ctrl+C or Esc (Esc under ``--repeat 0``,
+  where it is the way to finish, exits 0), 141 output closed early (as by
+  ``| head``).
 """
 
 from __future__ import annotations
@@ -39,6 +43,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Callable, Sequence
 
 from macro_recorder.gui.settings import RecordingSettings, Settings
+from macro_recorder.gui.text import visible_controls
 from macro_recorder.model import fileformat, validate
 from macro_recorder.model.actions.misc import BUTTON_SETS
 from macro_recorder.model.catalogue import spec_for
@@ -55,8 +60,9 @@ POLL_S = 0.05
 ASK_POLL_S = 0.1
 ASK_STOP_GRACE_S = 0.1
 EXIT_ERROR = 1
-EXIT_SESSION = 2
+EXIT_SESSION = 3            # 2 is argparse's usage error
 EXIT_INTERRUPTED = 130
+EXIT_BROKEN_PIPE = 128 + 13     # SIGPIPE
 
 _sleep = time.sleep
 
@@ -100,8 +106,12 @@ def make_stop_watcher(input: InputBackend) -> StopKeyWatcher:
 
 
 def key_is_known(name: str) -> bool:
-    """True when python-xlib knows ``name`` as a keysym."""
-    from macro_recorder.platform.x11 import keysym_from_name
+    """True when python-xlib knows ``name`` as a keysym (or is not installed,
+    so ``validate`` still runs without it)."""
+    try:
+        from macro_recorder.platform.x11 import keysym_from_name
+    except ImportError:
+        return True
     return keysym_from_name(name) != 0
 
 
@@ -260,10 +270,11 @@ def list_lines(document: MacroDocument) -> list[str]:
         parts = ["%*s %s %8s" % (number_width, number_text, marker, delay)]
         if label_width:
             parts.append("%-*s" % (label_width, row.label))
-        parts.append("%s%s: %s" % (indent, spec.name, spec.describe(row)))
+        # Typed newlines and tabs are shown escaped, so each row stays on one line.
+        parts.append("%s%s: %s" % (indent, spec.name, visible_controls(spec.describe(row))))
         line = "  ".join(parts)
         if row.comment:
-            line += "  # %s" % row.comment
+            line += "  # %s" % visible_controls(row.comment)
         lines.append(line.rstrip())
     return lines
 
@@ -291,7 +302,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
     except OSError as e:
         _error("cannot read %s: %s" % (args.file, e.strerror or e))
         return EXIT_ERROR
-    problems = validate.check(document)
+    problems = validate.check(document, key_is_known)
     for line in problem_lines(problems):
         print(line)
     if any(p.severity == "error" for p in problems):
@@ -500,7 +511,7 @@ def cmd_play(args: argparse.Namespace) -> int:
     if document is None:
         return EXIT_ERROR
     program = playable(document, args.no_filter)
-    problems = validate.check(program)
+    problems = validate.check(program, key_is_known)
     errors = blocking_problems(program, problems)
     if errors:
         for p in errors:
@@ -535,6 +546,12 @@ def cmd_play(args: argparse.Namespace) -> int:
             _drain(thread)
             print("Stopped", file=sys.stderr)
             return EXIT_INTERRUPTED
+        if not host.error and player.stopped():
+            # Esc: under --repeat 0 it is how a run ends, otherwise the run
+            # was cut short, as with Ctrl+C.
+            print("Stopped", file=sys.stderr)
+            if int(playback_settings(args).playback.repeat) != 0:
+                return EXIT_INTERRUPTED
     except OSError as e:
         _error(str(e))
         return EXIT_ERROR
@@ -589,7 +606,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Run one command and return its exit code."""
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
     args = build_parser().parse_args(argv)
-    return args.run(args)
+    try:
+        return args.run(args)
+    except BrokenPipeError:
+        # The reader went away (``list big.json | head``).  Point stdout at
+        # /dev/null so the flush at exit does not fail again.
+        try:
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        except (OSError, ValueError):
+            pass
+        return EXIT_BROKEN_PIPE
 
 
 if __name__ == "__main__":

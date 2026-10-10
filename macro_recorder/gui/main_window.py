@@ -46,6 +46,7 @@ from macro_recorder.model.document import PATH_MODES, MacroDocument, Row, make_r
 from macro_recorder.model.keys import format_combo, parse_combo
 from macro_recorder.model.protocols import Change, Mode, OverlayShape
 from macro_recorder.platform.session import OwnWindows, SessionProblem
+from macro_recorder.platform.x11 import keysym_from_name
 
 log = logging.getLogger(__name__)
 
@@ -609,9 +610,11 @@ class MainWindow:
         self._sash_binding: str | None = upper.bind("<Configure>", self._place_details_sash,
                                                     add="+")
         self.log_panel = LogPanel(self.main_pane)
+        self._log_placed = False
+        self._log_binding: str | None = None
         if self.settings.ui.log_visible:
             self.main_pane.add(self.log_panel, weight=0)
-            root.after_idle(self._restore_log_height)
+            self._restore_log_height()
         if self.platform is not None:
             self._overlay = Overlay(root, self._own_windows, self.settings.ui.overlay_enabled)
 
@@ -896,10 +899,37 @@ class MainWindow:
         self.upper_pane.sashpos(0, max(event.width - DETAILS_WIDTH, event.width // 2))
 
     def _restore_log_height(self) -> None:
-        self.root.update_idletasks()
-        height = self.main_pane.winfo_height()
-        if height > self.settings.ui.log_height + 80 and len(self.main_pane.panes()) > 1:
-            self.main_pane.sashpos(0, height - self.settings.ui.log_height)
+        """Give the Output Log its saved height once the pane has a real size.
+
+        Before the window is mapped the pane is 1 px tall, so the sash is
+        placed on the first <Configure> tall enough to hold the log.
+        """
+        if self._log_binding is not None:
+            return
+        self.root.update_idletasks()        # lay out a pane that was just added
+        if self._place_log_sash(self.main_pane.winfo_height()):
+            return
+        self._log_binding = self.main_pane.bind("<Configure>", self._on_main_pane_configure, add="+")
+
+    def _on_main_pane_configure(self, event: tk.Event) -> None:
+        if self._place_log_sash(int(event.height)) and self._log_binding is not None:
+            self.main_pane.unbind("<Configure>", self._log_binding)
+            self._log_binding = None
+
+    def _place_log_sash(self, height: int) -> bool:
+        if len(self.main_pane.panes()) < 2:
+            return True             # hidden meanwhile: nothing to place
+        if height <= self.settings.ui.log_height + 80:
+            return False
+        self.main_pane.sashpos(0, height - self.settings.ui.log_height)
+        self._log_placed = True
+        return True
+
+    def _log_height_now(self) -> int | None:
+        """The log's current height, or None before its saved height was placed."""
+        if not self._log_placed or len(self.main_pane.panes()) < 2:
+            return None
+        return max(60, self.main_pane.winfo_height() - self.main_pane.sashpos(0))
 
     # -- shortcuts and own windows -------------------------------------------
 
@@ -916,6 +946,9 @@ class MainWindow:
             root.bind("<Control-%s>" % key, lambda e: self._shortcut(
                 "edit.redo" if int(e.state) & 0x1 else "edit.undo"))
         root.bind("<F5>", lambda e: self._shortcut("play.play"))
+        # The table binds F8 too; this one serves the paused mode, where the
+        # table's own bindings are locked.
+        root.bind("<F8>", lambda e: self._shortcut("edit.toggle_breakpoint"))
         root.bind("<F9>", lambda e: self._shortcut("record.toggle", "F9"))
 
     def _shortcut(self, name: str, *args: Any) -> str:
@@ -990,7 +1023,9 @@ class MainWindow:
 
     def confirm_discard(self) -> bool:
         """Save / Don't save / Cancel when the document has unsaved changes.
-        True when the caller may go on."""
+        True when the caller may go on.  Text typed in the table's inline
+        editor is committed first, so it counts."""
+        self.table.commit_inline_edit()
         if not self.document.dirty:
             return True
         answer = self.ask_unsaved(display_name(self.document.path))
@@ -1035,17 +1070,19 @@ class MainWindow:
         self.document.reset(loaded.rows, loaded.filter, loaded.path_mode,
                             path=os.path.abspath(path))
         self._remember_path(path)
-        problems = validate.check(self.document)
+        problems = validate.check(self.document, lambda name: keysym_from_name(name) != 0)
         if problems:
             self.log_panel.append(["%s: %s" % (display_name(path), p) for p in problems])
         return True
 
     def save(self) -> bool:
+        self.table.commit_inline_edit()
         if self.document.path is None:
             return self.save_as()
         return self._write(self.document.path)
 
     def save_as(self) -> bool:
+        self.table.commit_inline_edit()
         folder = (os.path.dirname(self.document.path) if self.document.path
                   else self.settings.ui.last_folder)
         name = Path(self.document.path).name if self.document.path else "macro.json"
@@ -1066,6 +1103,7 @@ class MainWindow:
         self.document.mark_saved(os.path.abspath(path))
         self._remember_path(path)
         self._update_title()
+        self.details.refresh()      # the macro's folder may have changed
         return True
 
     def _remember_path(self, path: str) -> None:
@@ -1102,8 +1140,9 @@ class MainWindow:
         try:
             ui.geometry = self.root.wm_geometry()
             ui.log_visible = bool(self.log_var.get())
-            if ui.log_visible and len(self.main_pane.panes()) > 1:
-                ui.log_height = max(60, self.main_pane.winfo_height() - self.main_pane.sashpos(0))
+            height = self._log_height_now() if ui.log_visible else None
+            if height is not None:
+                ui.log_height = height
         except tk.TclError as e:
             log.debug("Reading the window layout failed: %s", e)
         try:
@@ -1165,9 +1204,15 @@ class MainWindow:
             return
         ids = self.insert_rows(rows)
         for row, row_id in zip(rows, ids):
-            if row.label and self.document.row(row_id).label != row.label:
-                self.log_panel.append(["Pasted row %d: label %r is already used and was cleared"
-                                       % (self.document.index_of(row_id) + 1, row.label)])
+            label = self.document.row(row_id).label
+            if row.label and label != row.label:
+                number = self.document.index_of(row_id) + 1
+                if label:
+                    line = "Pasted row %d: label %r is already used; renamed to %r" % (
+                        number, row.label, label)
+                else:
+                    line = "Pasted row %d: label %r is not valid and was cleared" % (number, row.label)
+                self.log_panel.append([line])
 
     def delete(self) -> None:
         ids = self.table.selected_ids()
@@ -1180,9 +1225,7 @@ class MainWindow:
             self.table.select([rows[min(first, len(rows) - 1)].id])
 
     def split(self) -> None:
-        for row_id in self.table.selected_ids():
-            if self.document.row(row_id).is_path:
-                self.document.split(row_id, self.settings.recording.min_wait_ms)
+        self.document.split(self.table.selected_ids())
 
     def toggle_enabled(self) -> None:
         ids = self.table.selected_ids()
@@ -1321,11 +1364,12 @@ class MainWindow:
         self.settings.ui.log_visible = visible
         if visible:
             self.main_pane.add(self.log_panel, weight=0)
-            self.root.after_idle(self._restore_log_height)
+            self._restore_log_height()
+            self.log_panel.show_end()
         else:
-            if len(self.main_pane.panes()) > 1:
-                self.settings.ui.log_height = max(
-                    60, self.main_pane.winfo_height() - self.main_pane.sashpos(0))
+            height = self._log_height_now()
+            if height is not None:
+                self.settings.ui.log_height = height
             self.main_pane.forget(self.log_panel)
 
     def toggle_overlay(self) -> None:
@@ -1398,6 +1442,9 @@ class _NoGrabber:
 
     def resume(self) -> list[str]:
         return []
+
+    def wait_keys_released(self, timeout_s: float) -> bool:
+        return True
 
     def close(self) -> None:
         pass

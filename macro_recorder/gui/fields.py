@@ -30,6 +30,7 @@ from typing import Any, Callable, Mapping
 
 from macro_recorder.engine import expressions
 from macro_recorder.engine.expressions import ExpressionError
+from macro_recorder.gui import dialogs
 from macro_recorder.model.actions.variables import DYNAMIC_NAMES
 from macro_recorder.model.actions.wait import format_colour
 from macro_recorder.model.actions.wait import parse_colour as _parse_rgb
@@ -405,14 +406,20 @@ class FieldContext:
     ``request_targeting(spec)`` starts a screen capture whose result the panel
     writes into ``spec.targeting_fills``.  ``request_key_capture(single,
     deliver)`` captures a key (``single``) or a combination and calls
-    ``deliver(text)``; None when the shell offers no capture.
+    ``deliver(text)``; None when the shell offers no capture.  ``folder()``
+    gives the macro's folder, read each time so a Save As to another folder
+    takes effect at once.
     """
     labels: Callable[[], list[str]]
     assigned_names: Callable[[], set[str]]
-    document_dir: str | None = None
+    folder: Callable[[], str | None] = lambda: None
     request_targeting: Callable[[FieldSpec], None] | None = None
     request_key_capture: Callable[[bool, Callable[[str], None]], None] | None = None
     action_type: str = ""
+
+    @property
+    def document_dir(self) -> str | None:
+        return self.folder()
 
 
 def _ensure_styles(widget: tk.Misc) -> None:
@@ -754,7 +761,8 @@ class FileField(_EntryField):
             options["filetypes"] = list(self.spec.file_types)
         if self.context.document_dir:
             options["initialdir"] = self.context.document_dir
-        path = filedialog.askopenfilename(**options)
+        with dialogs.modal():
+            path = filedialog.askopenfilename(**options)
         if path:
             self._vars[0].set(relative_to(path, self.context.document_dir))
 
@@ -775,7 +783,8 @@ class CommandField(_EntryField):
         options: dict[str, Any] = {"parent": self.frame}
         if self.context.document_dir:
             options["initialdir"] = self.context.document_dir
-        path = filedialog.askopenfilename(**options)
+        with dialogs.modal():
+            path = filedialog.askopenfilename(**options)
         if not path:
             return
         text, cursor = insert_quoted(self.text(), self.entry.index(tk.INSERT), path)
@@ -825,7 +834,8 @@ class ColourField(_EntryField):
             initial = parse_colour(self.text())
         except FieldError:
             initial = self.spec.default
-        _rgb, chosen = colorchooser.askcolor(color=initial, parent=self.frame)
+        with dialogs.modal():
+            _rgb, chosen = colorchooser.askcolor(color=initial, parent=self.frame)
         if chosen:
             self._vars[0].set(chosen.lower())
 

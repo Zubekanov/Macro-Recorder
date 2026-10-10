@@ -302,7 +302,7 @@ def test_exec_program_timeout_is_logged_and_playback_continues(tmp_path):
                r("type_text", text="next")], path=str(tmp_path / "m.json"))
     assert rig.play() is None
     assert rig.typed() == "next"
-    assert "code" not in rig.player.variables
+    assert rig.player.variables["code"] == -1
     assert any("did not exit within 200 ms" in line for line in rig.host.logs)
 
 

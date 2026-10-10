@@ -119,6 +119,17 @@ def test_function_misuse(expr):
         evaluate(expr, {})
 
 
+def test_round_refuses_a_huge_digit_count_quickly():
+    import time
+    start = time.monotonic()
+    for expr in ("round(5, -1000000000)", "round(5, 1001)", "round(5.5, -1001)"):
+        with pytest.raises(ExpressionError, match="between -1000 and 1000"):
+            evaluate(expr, {})
+    assert time.monotonic() - start < 1
+    assert evaluate("round(1234, -1000)", {}) == 0
+    assert evaluate("round(1234, -2)", {}) == 1200
+
+
 @pytest.mark.parametrize("expr", [
     "__import__('os')", "x.y", "x[0]", "[1, 2]", "lambda: 1", "x if 1 else 2",
     "open('f')", "abs(x=1)", "abs(*[1])", "True", "None", "1j", "a := 1",

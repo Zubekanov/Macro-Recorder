@@ -211,3 +211,19 @@ def test_specs_keep_their_overlays_and_describe():
     assert spec.describe(r) == "left double-click at (1, 2)"
     assert spec.overlay(r).kind == "click"
     assert catalogue.spec("mouse_scroll").describe(row("mouse_scroll", dy=-2)) == "scroll up 2"
+
+
+# ------------------------------------------------------------ path editing
+
+def test_path_duration_field_refuses_zero():
+    r = path_row([(0, 0), (5, 5), (9, 9)])
+    (field,) = [f for f in catalogue.spec_for(r).layout(r) if f.keys == ("duration_ms",)]
+    assert field.minimum == 1
+
+
+def test_path_with_no_timing_takes_a_new_duration_evenly():
+    r = path_row([(0, 0), (5, 5), (9, 9)], dt=0.0)
+    spec = catalogue.spec_for(r)
+    out = spec.write(r, {**spec.read(r), "duration_ms": 1000})
+    assert [e.dt for e in out.events] == [0.0, 0.5, 0.5]
+    assert out.span_s == pytest.approx(1.0)

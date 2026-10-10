@@ -117,6 +117,7 @@ class DetailsPanel(ttk.Frame):
         self._fields: list[tuple[FieldSpec, FieldWidget]] = []
         self._message_field: FieldWidget | None = None
         self._context = FieldContext(labels=document.labels, assigned_names=self._assigned,
+                                     folder=self._folder,
                                      request_targeting=self._start_targeting,
                                      request_key_capture=request_key_capture)
 
@@ -190,6 +191,11 @@ class DetailsPanel(ttk.Frame):
         except KeyError:
             return None
 
+    def _folder(self) -> str | None:
+        """The macro's folder, from the document's current path."""
+        path = self._document.path
+        return os.path.dirname(os.path.abspath(path)) if path else None
+
     def _assigned(self) -> set[str]:
         return names_assigned(self._document)
 
@@ -212,8 +218,6 @@ class DetailsPanel(ttk.Frame):
         layout = action.layout_for(row)
         values = action.read_row(row)
         self._context.action_type = row.type
-        self._context.document_dir = (os.path.dirname(os.path.abspath(self._document.path))
-                                      if self._document.path else None)
         key = (row.type, layout)
         if key != self._layout_key:
             self._build(row, layout, values)

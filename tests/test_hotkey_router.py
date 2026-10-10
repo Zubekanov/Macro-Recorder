@@ -70,6 +70,20 @@ def test_combos_route_by_mode(h, mode, combo, expected):
     assert h.calls == expected
 
 
+def test_play_combo_waits_for_its_keys_to_be_released(h):
+    h.grabber.wait_keys_released = lambda timeout_s: h.calls.append(("wait", timeout_s)) or True
+    h.grabber.press(PLAY)
+    h.mode = "paused"
+    h.grabber.press(PLAY)
+    assert h.calls == [("wait", 3.0), "play", ("wait", 3.0), "resume"]
+    h.calls.clear()
+    h.mode = "idle"
+    h.grabber.press(RECORD)                 # recording must not wait: the recorder drops the combo
+    h.mode = "playing"
+    h.grabber.press(PLAY)
+    assert h.calls == ["start_record"]
+
+
 def test_enum_modes_are_accepted(h):
     h.mode = Mode.PAUSED
     h.grabber.press(PLAY)

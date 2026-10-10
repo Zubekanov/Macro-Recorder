@@ -293,6 +293,27 @@ def test_good_keys():
                      row("key_press", key="Control_L"), row("key_release", key="a"))) == []
 
 
+def test_unknown_key_names_are_errors_when_a_keysym_table_is_given():
+    from macro_recorder.cli import key_is_known
+    d = doc(row("key_combo", keys="ctrl+esc"), row("key_press", key="esc"),
+            row("key_combo", keys="ctrl+shift+Escape"), row("key_release", key="space"))
+    assert check(d) == []
+    p = check(d, key_is_known)
+    assert found(p, 0, "keys", "Unknown key 'esc'")
+    assert found(p, 1, "key", "Unknown key 'esc'")
+    assert [x.row_index for x in p] == [0, 1]
+
+
+# ---------------------------------------------------------------- windows
+
+def test_window_regex_that_does_not_compile_is_an_error():
+    p = check(doc(row("window_focus", window="xed (", match_mode="regex"),
+                  row("window_focus", window="xed (", match_mode="substring"),
+                  row("window_focus", window=r" - xed$", match_mode="regex")))
+    assert found(p, 0, "window", "bad regular expression")
+    assert [x.row_index for x in p] == [0]
+
+
 # --------------------------------------------------------------- type_text
 
 def test_type_text_delay_and_duration_are_exclusive():

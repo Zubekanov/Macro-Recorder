@@ -108,6 +108,9 @@ class MacroDocument:
         self._filter: tuple[str, ...] = tuple(filter)
         self._path_mode = path_mode
         self.path: str | None = path
+        # Revision numbers are never reused, so a state reached by undo and a
+        # new edit can never be mistaken for the saved one.
+        self._revisions = itertools.count(1)
         self._revision = 0
         self._saved_revision = 0
         self._undo: list[tuple[_State, int]] = []
@@ -204,18 +207,32 @@ class MacroDocument:
     # ------------------------------------------------------------ mutations
 
     def insert(self, index: int, rows: Sequence[Row]) -> tuple[int, ...]:
-        """Insert rows (fresh ids; duplicate labels cleared).  Returns the new ids."""
+        """Insert rows with fresh ids.  Returns the new ids.
+
+        An invalid label is cleared.  A label already in use is renamed to the
+        first free ``"<label> 2"``, ``"<label> 3"``..., and the inserted rows
+        that jump to it are retargeted, so a pasted block keeps jumping inside
+        itself rather than into the original.
+        """
         if not rows:
             return ()
-        fresh = []
         used = {r.label.lower() for r in self._rows if r.label}
+        renames: dict[str, str] = {}
+        labelled = []
         for r in rows:
             label = r.label
-            if label and (label.lower() in used or label_problem(label) is not None):
+            if label and label_problem(label) is not None:
                 label = ""
+            elif label and label.lower() in used:
+                n = 2
+                while ("%s %d" % (label, n)).lower() in used:
+                    n += 1
+                renames[label.lower()] = "%s %d" % (label, n)
+                label = "%s %d" % (label, n)
             if label:
                 used.add(label.lower())
-            fresh.append(replace(r, id=new_row_id(), label=label))
+            labelled.append(replace(r, label=label))
+        fresh = [replace(_retarget_all(r, renames), id=new_row_id()) for r in labelled]
         index = max(0, min(index, len(self._rows)))
         self._commit(self._rows[:index] + tuple(fresh) + self._rows[index:],
                      Change("inserted", tuple(r.id for r in fresh)))
@@ -258,6 +275,7 @@ class MacroDocument:
                 raise ValueError(problem)
         if old.label != row.label and old.label:
             rows = tuple(_retarget(r, old.label, row.label) for r in rows)
+            row = _retarget(row, old.label, row.label)
         rows = tuple(row if r.id == row.id else r for r in rows)
         if rows == self._rows:
             return
@@ -314,30 +332,42 @@ class MacroDocument:
         self._commit(tuple(replace(r, breakpoint=not r.breakpoint) if r.id in wanted else r
                            for r in self._rows), Change("updated", tuple(wanted)))
 
-    def split(self, row_id: int, min_wait_ms: int = 100) -> tuple[int, ...]:
-        """Turn a path row into one mouse_move row per point.
+    def split(self, ids: int | Iterable[int]) -> tuple[int, ...]:
+        """Turn each path row among ``ids`` into one mouse_move row per point,
+        as one undo step.
 
-        The first new row keeps the id, label, comment, breakpoint and delay;
-        gaps of ``min_wait_ms`` or more become the next row's delay.
+        The first new row of each path keeps the id, label, comment,
+        breakpoint and delay; each later point's ``dt`` becomes its row's
+        delay.  Returns the ids of the resulting rows in document order.
         """
-        row = self.row(row_id)
-        if not row.is_path:
-            return (row_id,)
-        index = self.index_of(row_id)
-        new_rows: list[Row] = []
-        for i, ev in enumerate(row.events):
-            delay = int(round(ev.dt * 1000)) if i else row.delay_ms
-            if i == 0:
-                new_rows.append(replace(row, events=(ev.with_dt(0.0),)))
-            else:
-                new_rows.append(Row(id=new_row_id(), events=(ev.with_dt(0.0),),
-                                    enabled=row.enabled, delay_ms=delay))
-        rows = self._rows[:index] + tuple(new_rows) + self._rows[index + 1:]
-        self._commit(rows, Change("reset"))
-        return tuple(r.id for r in new_rows)
+        wanted = {ids} if isinstance(ids, int) else set(ids)
+        rows: list[Row] = []
+        result: list[int] = []
+        changed = False
+        for row in self._rows:
+            if row.id not in wanted:
+                rows.append(row)
+                continue
+            if not row.is_path:
+                rows.append(row)
+                result.append(row.id)
+                continue
+            changed = True
+            for i, ev in enumerate(row.events):
+                if i == 0:
+                    new = replace(row, events=(ev.with_dt(0.0),))
+                else:
+                    new = Row(id=new_row_id(), events=(ev.with_dt(0.0),),
+                              enabled=row.enabled, delay_ms=int(round(ev.dt * 1000)))
+                rows.append(new)
+                result.append(new.id)
+        if changed:
+            self._commit(tuple(rows), Change("reset"))
+        return tuple(result)
 
     def set_filter(self, groups: Iterable[str]) -> None:
-        groups = tuple(g for g in FILTER_GROUPS if g in set(groups))
+        wanted = set(groups)
+        groups = tuple(g for g in FILTER_GROUPS if g in wanted)
         if groups == self._filter:
             return
         self._commit(self._rows, Change("meta"), filter=groups)
@@ -360,10 +390,9 @@ class MacroDocument:
         if clear_history:
             self._undo.clear()
             self._redo.clear()
-            self._revision = 0
-            self._saved_revision = 0
+            self._revision = self._saved_revision = next(self._revisions)
         else:
-            self._revision += 1
+            self._revision = next(self._revisions)
         self.end_edit()
         self._notify(Change("reset"))
 
@@ -419,7 +448,7 @@ class MacroDocument:
             self._redo.clear()
             if change.kind == "updated" and self._session_key is not None:
                 self._session_open = True
-        self._revision += 1
+        self._revision = next(self._revisions)
         self._rows = rows
         if filter is not None:
             self._filter = filter
@@ -455,22 +484,40 @@ def target_keys(row: Row) -> tuple[str, ...]:
 
 
 def _retarget(row: Row, old: str, new: str) -> Row:
+    return _retarget_all(row, {old.lower(): new})
+
+
+def _retarget_all(row: Row, renames: Mapping[str, str]) -> Row:
+    """Apply ``renames`` (lower-cased old label -> new label) to the row's targets at once."""
+    if not renames:
+        return row
     changes = {}
     for key in target_keys(row):
         value = row.event.get(key)
-        if isinstance(value, str) and value.lower() == old.lower():
-            changes[key] = new
+        if isinstance(value, str) and value.lower() in renames:
+            changes[key] = renames[value.lower()]
     if not changes:
         return row
     return replace(row, events=(row.event.with_params(**changes),))
 
 
 def rows_referencing(rows: Sequence[Row], label: str) -> list[Row]:
+    """Rows with a visible target field naming ``label``.
+
+    A target hidden by its field's ``visible_when`` (a pixel wait's Go to
+    while On timeout is Abort, say) is ignored, as validation ignores it.
+    """
+    from macro_recorder.model.catalogue import FieldKind
     out = []
     for r in rows:
-        for key in target_keys(r):
-            value = r.event.get(key)
-            if isinstance(value, str) and value.lower() == label.lower():
+        params = r.event.params
+        for f in spec(r.type).fields:
+            if f.kind != FieldKind.LABEL_TARGET:
+                continue
+            if f.visible_when is not None and not f.visible_when(params):
+                continue
+            if any(isinstance(params.get(k), str) and params[k].lower() == label.lower()
+                   for k in f.keys):
                 out.append(r)
                 break
     return out

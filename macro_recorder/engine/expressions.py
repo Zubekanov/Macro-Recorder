@@ -37,6 +37,8 @@ MAX_EXPONENT = 1000
 # Integer powers whose result would exceed this many bits are refused so a
 # nested power such as (9 ** 1000) ** 1000 cannot exhaust memory.
 MAX_POWER_BITS = 1_000_000
+# The largest digit count round() takes, in either sign.
+MAX_ROUND_DIGITS = 1000
 
 
 class ExpressionError(ValueError):
@@ -99,6 +101,10 @@ def _fn_round(value: Value, digits: Value | None = None) -> int | float:
     places = _number(digits, "round")
     if not isinstance(places, int):
         raise ExpressionError("round() needs a whole number of digits")
+    # round(int, -n) builds 10 ** n in one C call that Stop cannot interrupt.
+    if abs(places) > MAX_ROUND_DIGITS:
+        raise ExpressionError("round() digits must be between -%d and %d"
+                              % (MAX_ROUND_DIGITS, MAX_ROUND_DIGITS))
     return round(number, places)
 
 

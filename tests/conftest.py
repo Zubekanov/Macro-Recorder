@@ -180,6 +180,7 @@ class FakeHotkeys:
         self.grabbed: dict[str, Callable[[], None]] = {}
         self.refuse = refuse or set()
         self.suspended = False
+        self.waits: list[float] = []
 
     def grab(self, combo, callback):
         if combo in self.refuse:
@@ -196,6 +197,10 @@ class FakeHotkeys:
     def resume(self):
         self.suspended = False
         return []
+
+    def wait_keys_released(self, timeout_s):
+        self.waits.append(timeout_s)
+        return True
 
     def close(self):
         self.grabbed.clear()

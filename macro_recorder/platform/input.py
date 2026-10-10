@@ -169,14 +169,22 @@ def _drain_mapping_changes(d) -> bool:
 # Injection
 # ---------------------------------------------------------------------------
 
+# How long borrowed keycodes stay mapped after the last key event, so clients
+# that fetch the keymap lazily still decode the last borrowed key.
+BORROW_RESTORE_DELAY_S = 0.15
+
+
 class XTestInput:
     """``InputBackend`` over XTest on its own connection.
 
-    Keys are keysym names.  ``press_key`` presses the keycode that carries
-    the keysym and adds no modifiers; ``type_char`` adds Shift or Level 3 as
-    the keymap needs.  Keysyms the keymap lacks are typed on a borrowed
-    spare keycode, restored by :meth:`release_all`.  Every synthetic key
-    press is noted in ``synthetic`` for the stop-key fallback.
+    Keys are keysym names, looked up in the active XKB group.
+    ``press_key`` presses the keycode that carries the keysym and adds no
+    modifiers, except Shift for a keypad keysym or an upper-case letter that
+    the live Num Lock or Caps Lock state would otherwise turn into the other
+    level; ``type_char`` adds Shift or Level 3 as the keymap and the lock
+    state need.  Keysyms the active group lacks are typed on a borrowed spare
+    keycode, restored by :meth:`release_all`.  Every synthetic key press is
+    noted in ``synthetic`` for the stop-key fallback.
     """
 
     def __init__(self, display_name: str | None = None,
@@ -191,6 +199,7 @@ class XTestInput:
         self._borrower = x11.KeycodeBorrower(self._d, self._kmap)
         self._held_keys: list[int] = []
         self._held_buttons: list[int] = []
+        self._pressed_names: dict[str, int] = {}    # key name -> keycode press_key used
 
     # -- keymap -------------------------------------------------------------
 
@@ -198,21 +207,47 @@ class XTestInput:
         if _drain_mapping_changes(self._d):
             self._kmap = x11.KeyboardMap.from_display(self._d)
             self._borrower.kmap = self._kmap
+            self._borrower.forget_stale()
 
-    def keycode_for(self, name: str) -> int:
-        """Keycode for a key name, borrowing one when unmapped.  Raises ValueError."""
+    def _state(self) -> int:
+        """The live modifier state: lock bits and the XKB group are what matter."""
+        return int(self._d.screen().root.query_pointer().mask)
+
+    def _resolve_key(self, name: str) -> tuple[int, bool]:
+        """``(keycode, add_shift)`` for a key name.  Raises ValueError.
+
+        Shift is added only for a keypad keysym or an upper-case letter that
+        needs it under the live lock state (KP_1 with Num Lock off, A with
+        Caps Lock off); any other keysym is pressed bare, as recorded.
+        """
         name = normalise_key(name)
         keysym = x11.keysym_from_name(name)
         if not keysym:
             raise ValueError("Unknown key %r" % name)
         with self._lock:
             self._refresh_keymap()
-            keycode = self._kmap.keycode_for(keysym)
-            if keycode is None:
-                keycode = self._borrower.borrow(keysym, busy=self._held_keys)
+            found = self._kmap.find_for_state(keysym, self._state(), level3=False)
+            if found is not None:
+                keycode, shift, _ = found
+                case = x11.keysym_case(keysym)
+                wants_level = x11.is_keypad(keysym) or (case is not None and case[1] == keysym)
+                return keycode, shift and wants_level
+            keycode = self._borrower.borrow(keysym, busy=self._held_keys)
             if keycode is None:
                 raise ValueError("No spare keycode to type %r" % name)
-            return keycode
+            return keycode, False
+
+    def keycode_for(self, name: str) -> int:
+        """Keycode for a key name, borrowing one when unmapped.  Raises ValueError."""
+        return self._resolve_key(name)[0]
+
+    def _shift_keycode(self) -> int | None:
+        """The Shift_L keycode, or None when the macro already holds a Shift."""
+        shift = self._kmap.keycode_for(x11.keysym_from_name("Shift_L"))
+        held = {self._kmap.keycode_for(x11.keysym_from_name(n)) for n in ("Shift_L", "Shift_R")}
+        if shift is None or held.intersection(self._held_keys):
+            return None
+        return shift
 
     # -- low level ----------------------------------------------------------
 
@@ -274,12 +309,23 @@ class XTestInput:
             self._sync()
 
     def press_key(self, name: str) -> None:
-        keycode = self.keycode_for(name)
+        keycode, add_shift = self._resolve_key(name)
         with self._lock:
+            shift = self._shift_keycode() if add_shift else None
+            if shift is not None:
+                self._key(shift, True)
             self._key(keycode, True)
+            if shift is not None:
+                # The press already carried Shift; letting go now keeps it
+                # from changing anything else typed while the key is held.
+                self._key(shift, False)
+            self._pressed_names[normalise_key(name)] = keycode
 
     def release_key(self, name: str) -> None:
-        keycode = self.keycode_for(name)
+        with self._lock:
+            keycode = self._pressed_names.pop(normalise_key(name), None)
+        if keycode is None:
+            keycode = self.keycode_for(name)
         with self._lock:
             self._key(keycode, False)
 
@@ -294,27 +340,22 @@ class XTestInput:
             self._refresh_keymap()
             level3_key = self._kmap.keycode_for(x11.keysym_from_name("ISO_Level3_Shift"))
             can_level3 = level3_key is not None and bool(self._kmap.level3_mask)
+            state = self._state()
             found = None
             for keysym in keysyms:
-                found = self._kmap.find(keysym)
-                if found is not None and (found[1] < 4 or can_level3):
+                found = self._kmap.find_for_state(keysym, state, level3=can_level3)
+                if found is not None:
                     break
-                found = None
             if found is None:
-                keysym = keysyms[0]
-                keycode = self._borrower.borrow(keysym, busy=self._held_keys)
+                keycode = self._borrower.borrow(keysyms[0], busy=self._held_keys)
                 if keycode is None:
                     raise ValueError("No spare keycode to type %r" % char)
-                found = (keycode, 0)
-            keycode, index = found
-            shift = index in (1, 5)
-            case = x11.keysym_case(keysym)
-            if case is not None and self._caps_lock_on():
-                shift = not shift
+                found = (keycode, False, False)
+            keycode, shift, level3 = found
             modifiers = []
             if shift:
                 modifiers.append(self._kmap.keycode_for(x11.keysym_from_name("Shift_L")))
-            if index >= 4:
+            if level3:
                 modifiers.append(level3_key)
             modifiers = [m for m in modifiers if m is not None and m not in self._held_keys]
             for m in modifiers:
@@ -324,17 +365,24 @@ class XTestInput:
             for m in reversed(modifiers):
                 self._key(m, False)
 
-    def _caps_lock_on(self) -> bool:
-        return bool(self._d.screen().root.query_pointer().mask & X.LockMask)
-
     def release_all(self) -> None:
-        """Release every held key and button, then restore borrowed keycodes."""
+        """Release every held key and button, then restore borrowed keycodes.
+
+        A core-protocol client (xterm, Java, Wine) fetches the keymap only
+        when it decodes a key event after the MappingNotify, so restoring at
+        once could leave it decoding the last borrowed key with the restored
+        mapping.  The restore therefore waits ``BORROW_RESTORE_DELAY_S``.
+        """
         with self._lock:
             for keycode in reversed(list(self._held_keys)):
                 self._key(keycode, False)
             for button in reversed(list(self._held_buttons)):
                 self._button(button, False)
-            self._borrower.restore_all()
+            self._pressed_names.clear()
+            if self._borrower.borrowed:
+                self._d.sync()
+                time.sleep(BORROW_RESTORE_DELAY_S)
+                self._borrower.restore_all()
 
     def close(self) -> None:
         with self._lock:
@@ -609,6 +657,27 @@ class XGrabHotkeys:
                 failed.append(combo)
         return failed
 
+    def wait_keys_released(self, timeout_s: float) -> bool:
+        """Block until the keyboard has no key down, up to ``timeout_s``.
+
+        A passive grab activated by a hotkey press lasts until that key is
+        released, and until then the server sends every key event (synthetic
+        ones too) to this connection, where they are dropped.  Playback
+        started from a hotkey waits here so its first keystrokes reach the
+        target window, and so held modifiers do not change them.
+        """
+        deadline = time.monotonic() + timeout_s
+        while True:
+            with self._lock:
+                down = x11.keys_down(self._d)
+            if not down:
+                return True
+            if time.monotonic() >= deadline:
+                log.warning("Keys still held after %.1f s: keycodes %s", timeout_s,
+                            ", ".join(map(str, down)))
+                return False
+            time.sleep(0.01)
+
     def _grabs_changed_locked(self, old: x11.KeyboardMap) -> bool:
         """True when a keymap change moved a combo or the lock masks a grab covers."""
         if x11.lock_variants(old) != x11.lock_variants(self._kmap):
@@ -750,6 +819,8 @@ def _capture_loop(d, root, timeout_s: float,
             select.select([fd], [], [], 0.05)
             continue
         ev = d.next_event()
+        if ev.type in (X.ButtonPress, X.ButtonRelease) and int(ev.detail) in x11.SCROLL_BUTTONS:
+            continue            # a wheel notch is not a pick
         if ev.type == X.ButtonPress and held_button is None:
             x, y = int(ev.root_x), int(ev.root_y)
             captured = (x, y, x11.pixel_colour(d, x, y))

@@ -73,6 +73,38 @@ def test_client_size_inverts_outer_rect():
     assert x11.client_size(2, 2, ext) == (1, 1)     # never below 1x1
 
 
+def test_gtk_shadow_counts_against_the_outer_rect():
+    # A header-bar window: no WM frame, a 26 px shadow (34 at the bottom) inside the client.
+    ext = x11.combined_extents(None, [26, 26, 23, 34])
+    assert ext == [-26, -26, -23, -34]
+    assert x11.outer_rect(100, 100, 452, 557, ext) == (126, 123, 400, 500)
+    assert x11.client_size(400, 500, ext) == (452, 557)
+    assert x11.combined_extents([2, 2, 30, 2], None) == [2, 2, 30, 2]
+    assert x11.combined_extents([2, 2, 30, 2], [1, 1, 1, 1]) == [1, 1, 29, 1]
+    assert x11.combined_extents(None, None) is None
+
+
+def test_strut_rects_from_partial_and_full_struts():
+    # A 40 px bottom panel on the left monitor of 2x1920x1080.
+    assert x11.strut_rects([0, 0, 0, 40, 0, 0, 0, 0, 0, 0, 0, 1919], 3840, 1080) == [
+        Rect(0, 1040, 1920, 40)]
+    assert x11.strut_rects([30, 0, 0, 0], 800, 600) == [Rect(0, 0, 30, 600)]
+    assert x11.strut_rects([1, 2, 3], 800, 600) == []
+
+
+def test_per_monitor_work_areas_prefer_the_window_managers_own():
+    left, right = Rect(0, 0, 1920, 1080), Rect(1920, 0, 1920, 1080)
+    workarea = Rect(0, 0, 3840, 1040)              # clipped as if the panel spanned both
+    gtk = [Rect(1920, 0, 1920, 1080), Rect(0, 0, 1920, 1040)]
+    mons = monitor_work_areas([left, right], workarea, gtk)
+    assert [m.work_area for m in mons] == [Rect(0, 0, 1920, 1040), Rect(1920, 0, 1920, 1080)]
+    struts = [Rect(0, 1040, 1920, 40)]
+    mons = monitor_work_areas([left, right], workarea, None, struts)
+    assert [m.work_area for m in mons] == [Rect(0, 0, 1920, 1040), Rect(1920, 0, 1920, 1080)]
+    mons = monitor_work_areas([left, right], workarea, None, [])
+    assert [m.work_area for m in mons] == [Rect(0, 0, 1920, 1040), Rect(1920, 0, 1920, 1040)]
+
+
 def test_intersect():
     assert x11.intersect(Rect(0, 0, 100, 100), Rect(50, 20, 100, 100)) == Rect(50, 20, 50, 80)
     assert x11.intersect(Rect(0, 0, 10, 10), Rect(10, 0, 5, 5)) is None

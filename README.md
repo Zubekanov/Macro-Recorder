@@ -23,18 +23,19 @@ By hand:
 ```
 sudo apt install tesseract-ocr xvfb
 curl -LsSf https://astral.sh/uv/install.sh | sh    # if uv is not installed yet
+source $HOME/.local/bin/env                         # puts the new uv on PATH in this shell
 uv sync
 ```
 
 uv installs its own CPython (`python-preference = "only-managed"` in
 `pyproject.toml`), which bundles tkinter, so the system `python3-tk` is not
-needed. Extra OCR languages come from `tesseract-ocr-<lang>` packages.
+needed. OCR uses Tesseract's English model.
 
 ## X11 only
 
 Recording uses XRecord, playback XTest, the stop keys XInput2 and the
 hotkeys XGrabKey; Wayland offers none of them. In a Wayland session the GUI
-disables Record and Play and the CLI exits with status 2 and this message:
+disables Record and Play and the CLI exits with status 3 and this message:
 
 ```
 This is a Wayland session. Recording and playback need X11: log out and
@@ -58,6 +59,9 @@ uv run macro-recorder-cli validate out.json
 `--window-timeout MS`, `--on-missing skip|halt`, `--no-filter` and
 `--verbose`; `record` takes `--stop-key KEY`. `list` and `validate` need no
 display. Run `uv run macro-recorder-cli COMMAND --help` for details.
+
+Exit status: 0 done, 1 an error, 2 a bad command line, 3 no X11 session,
+130 stopped by Ctrl+C or Esc (Esc under `--repeat 0` exits 0).
 
 Settings live in `$XDG_CONFIG_HOME/macro-recorder/settings.json` and the log
 in `$XDG_CACHE_HOME/macro-recorder/app.log`.

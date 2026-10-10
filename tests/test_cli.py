@@ -163,6 +163,49 @@ def test_list_without_labels_has_no_label_column(tmp_path, capsys):
     assert capsys.readouterr().out == "1               Wait: 200 ms\n"
 
 
+def test_list_keeps_typed_newlines_on_one_line(capsys):
+    example = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(cli.__file__))),
+                           "examples", "xed-demo.json")
+    assert cli.main(["list", example]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    (typed,) = [line for line in lines if "Type Text" in line]
+    assert 'Macro Recorder\\n"' in typed
+    assert all(line == "" or line.lstrip()[0].isdigit() or line.lstrip()[0] == "["
+               for line in lines)
+
+
+def test_example_targets_only_xed_windows(capsys):
+    from macro_recorder.platform.windows import title_matches
+    example = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(cli.__file__))),
+                           "examples", "xed-demo.json")
+    assert cli.main(["validate", example]) == 0
+    row = fileformat.load(example).rows[0]
+    pattern, mode = row.event["window"], row.event["match_mode"]
+    assert title_matches("Unsaved Document 1 - xed", pattern, mode)
+    assert title_matches("notes.txt (~/Documents) - xed", pattern, mode)
+    for other in ("Fixed bugs - Mozilla Firefox", "xed-demo.json - GitHub", "Mixed results"):
+        assert not title_matches(other, pattern, mode), other
+
+
+def test_list_escapes_a_comment_with_a_newline(tmp_path, capsys):
+    path = save(tmp_path, [make_row(make("wait", duration_ms=200), comment="two\nlines")])
+    assert cli.main(["list", path]) == 0
+    assert capsys.readouterr().out == "1               Wait: 200 ms  # two\\nlines\n"
+
+
+def test_list_into_a_closed_pipe_exits_quietly(tmp_path):
+    path = save(tmp_path, [make_row(make("wait", duration_ms=i + 1)) for i in range(5000)])
+    code = "import sys; from macro_recorder import cli; sys.exit(cli.main(['list', sys.argv[1]]))"
+    cwd = os.path.dirname(os.path.dirname(os.path.abspath(cli.__file__)))
+    proc = subprocess.Popen([sys.executable, "-c", code, path], cwd=cwd,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc.stdout.readline()
+    proc.stdout.close()                             # as `| head -1` does
+    err = proc.stderr.read().decode()
+    assert proc.wait(10) == 141
+    assert "Traceback" not in err and "BrokenPipe" not in err
+
+
 def test_list_bad_file(tmp_path, capsys):
     path = tmp_path / "bad.json"
     path.write_text('{"version": 2, "rows": []}')
@@ -244,7 +287,7 @@ def test_session_refusal(env, argv, monkeypatch, capsys, platform):
         monkeypatch.delenv(name, raising=False)
     for name, value in env.items():
         monkeypatch.setenv(name, value)
-    assert cli.main(argv) == 2
+    assert cli.main(argv) == 3                      # 2 is argparse's usage error
     assert capsys.readouterr().err.startswith("Error: ")
     assert platform.input.actions == []
 
@@ -337,13 +380,22 @@ def test_play_repeat(tmp_path, platform):
     assert platform.input.actions.count(("press_button", "left")) == 3
 
 
-def test_play_stop_key_is_watched(tmp_path, platform):
+def test_play_stop_key_is_watched(tmp_path, capsys, platform):
     path = save(tmp_path, [make_row(make("wait", duration_ms=60000))])
     timer = threading.Timer(0.2, lambda: platform.watcher.press())
     timer.start()
     started = time.monotonic()
-    assert cli.main(["play", path]) == 0
+    assert cli.main(["play", path]) == 130          # cut short, as with Ctrl+C
     assert time.monotonic() - started < 5
+    assert "Stopped" in capsys.readouterr().err
+
+
+def test_play_esc_under_repeat_forever_exits_0(tmp_path, capsys, platform):
+    path = save(tmp_path, [make_row(make("wait", duration_ms=50))])
+    timer = threading.Timer(0.3, lambda: platform.watcher.press())
+    timer.start()
+    assert cli.main(["play", path, "--repeat", "0"]) == 0
+    assert "Stopped" in capsys.readouterr().err
 
 
 def test_play_ctrl_c_stops_the_player(tmp_path, capsys, monkeypatch, platform):

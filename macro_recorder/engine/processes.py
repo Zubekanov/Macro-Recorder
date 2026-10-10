@@ -22,6 +22,8 @@ log = logging.getLogger(__name__)
 
 POLL_S = 0.05
 TERM_GRACE_S = 2.0
+# How often a reaper checks whether an unwaited child's group still exists.
+GROUP_POLL_S = 0.5
 
 
 class ProcessError(RuntimeError):
@@ -71,9 +73,10 @@ def run(command: str, cwd: str | None, wait: bool, timeout_ms: float,
     except OSError as e:
         raise ProcessError("Could not run %r: %s" % (command, e)) from e
     if not wait:
-        threading.Thread(target=proc.wait, name="reaper-%d" % proc.pid, daemon=True).start()
         if children is not None:
             children.append(proc)
+        threading.Thread(target=_reap, args=(proc, children), name="reaper-%d" % proc.pid,
+                         daemon=True).start()
         return None
     deadline = time.monotonic() + timeout_ms / 1000.0 if timeout_ms and timeout_ms > 0 else None
     while True:
@@ -89,6 +92,25 @@ def run(command: str, cwd: str | None, wait: bool, timeout_ms: float,
             raise ProcessTimeout("%r did not finish within %d ms" % (command, int(timeout_ms)))
 
 
+def _reap(proc: subprocess.Popen, children: list[subprocess.Popen] | None) -> None:
+    """Reap an unwaited child, then drop it from ``children`` once its group is gone.
+
+    The kernel does not reuse a number while a process group of that number
+    exists, so dropping the entry soon after the group ends keeps
+    :func:`terminate` from signalling an unrelated group that later gets the
+    same number.
+    """
+    proc.wait()
+    if children is None:
+        return
+    while _group_alive(proc):
+        time.sleep(GROUP_POLL_S)
+    try:
+        children.remove(proc)
+    except ValueError:
+        pass
+
+
 def terminate(procs: list[subprocess.Popen]) -> None:
     """End the process groups of ``procs``: SIGTERM, then SIGKILL after the grace period.
 
@@ -96,6 +118,7 @@ def terminate(procs: list[subprocess.Popen]) -> None:
     member is left, so a grandchild that ignores SIGTERM is killed even after
     its group leader has exited.
     """
+    procs = list(procs)         # reapers may drop entries meanwhile
     groups = [p for p in procs if _signal_group(p, signal.SIGTERM)]
     deadline = time.monotonic() + TERM_GRACE_S
     while groups and time.monotonic() < deadline:

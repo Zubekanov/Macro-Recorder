@@ -229,6 +229,34 @@ def test_huge_integers_are_reported(tmp_path, event, row_extra, fragment):
     assert any(p.startswith("Row 1: ") and fragment in p for p in info.value.problems)
 
 
+@pytest.mark.parametrize("key, value", [
+    ("client_rect", [1, 2, 3]),
+    ("rect", "abcd"),
+    ("rect", [1, 2, 3, "x"]),
+    ("client_rect", [1, 2, 3, 10 ** 400]),
+    ("rect", [1, 2, 3, True]),
+])
+def test_window_rects_must_be_four_numbers(tmp_path, key, value):
+    event = {"type": "window_focus", "window": "xed", key: value}
+    with pytest.raises(FormatError) as info:
+        load(write_json(tmp_path, json.dumps(doc_with([{"events": [event]}]))))
+    assert any(p.startswith("Row 1: ") and "%s must be null or a list of 4 numbers" % key in p
+               for p in info.value.problems)
+
+
+def test_window_rects_load_as_null_or_four_numbers(tmp_path):
+    event = {"type": "window_focus", "window": "xed", "rect": [0, 0, 10.5, 20], "client_rect": None}
+    doc = load(write_json(tmp_path, json.dumps(doc_with([{"events": [event]}]))))
+    assert doc.rows[0].event["rect"] == (0, 0, 10.5, 20)
+
+
+def test_save_refuses_a_bad_window_rect(tmp_path):
+    bad =MacroDocument([make_row(make("window_focus", window="xed", rect=(1, 2, 3)))])
+    with pytest.raises(FormatError):
+        save(bad, tmp_path / "bad.json")
+    assert not (tmp_path / "bad.json").exists()
+
+
 def test_huge_dt_is_reported(tmp_path):
     events = [{"type": "mouse_move", "x": 1, "y": 2},
               {"type": "mouse_move", "x": 3, "y": 4, "dt": 10 ** 400}]

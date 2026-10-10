@@ -7,6 +7,8 @@ these tests swap minimal ones into the catalogue (see :func:`plays`).
 from __future__ import annotations
 
 import dataclasses
+import os
+import signal
 import threading
 import time
 
@@ -35,8 +37,10 @@ def _wait(ctx, row):
 def _click(ctx, row):
     x, y = ctx.coord(row.event["x"], row.event["y"])
     ctx.input.move(x, y)
-    ctx.hold_button(row.event["button"])
-    ctx.unhold_button(row.event["button"])
+    if row.event["action"] != "up":
+        ctx.hold_button(row.event["button"])
+    if row.event["action"] != "down":
+        ctx.unhold_button(row.event["button"])
     return Flow.NEXT
 
 
@@ -631,6 +635,75 @@ def test_breakpoint_pause_releases_and_represses(no_spacing):
     assert rig.input.held_keys == set()                          # released on exit
 
 
+def test_held_button_is_pressed_again_where_it_was_released(no_spacing):
+    host = FakeHost()
+    rows = [make_row(make("mouse_click", x=100, y=200, action="down")), wait(10, breakpoint=True)]
+    rig = Rig(rows, no_spacing, host=host)
+    marks = []
+
+    def on_paused(row_id, variables):
+        rig.input.move(700, 650)                # the user moves the pointer to Continue
+        marks.append(len(rig.input.actions))
+        rig.player.resume()
+    host.on_paused = on_paused
+    rig.play()
+    assert rig.error is None
+    after = rig.input.actions[marks[0]:]
+    assert after[:2] == [("move", 100, 200), ("press_button", "left")]
+
+
+def test_held_button_follows_a_window_that_moved_while_paused(no_spacing):
+    host = FakeHost()
+    windows = FakeWindows([window(0x100, "xed", left=100, top=80, width=900, height=600)])
+    rows = [win("xed", restore_rect="no"), make_row(make("mouse_click", x=150, y=160, action="down")),
+            wait(10, breakpoint=True)]
+    rig = Rig(rows, no_spacing, host=host, windows=windows)
+    marks = []
+
+    def on_paused(row_id, variables):
+        windows.windows[0] = window(0x100, "xed", left=300, top=200, width=900, height=600)
+        rig.input.move(5, 5)
+        marks.append(len(rig.input.actions))
+        rig.player.resume()
+    host.on_paused = on_paused
+    rig.play()
+    assert rig.error is None
+    after = rig.input.actions[marks[0]:]
+    assert after[:2] == [("move", 350, 280), ("press_button", "left")]
+
+
+def test_stop_just_before_a_breakpoint_is_not_lost(no_spacing):
+    host = FakeHost()
+    rows = [click(1, 1), click(2, 2, breakpoint=True)]
+    rig = Rig(rows, no_spacing, host=host)
+    on_row = host.on_row
+
+    def stop_on_breakpoint_row(row_id):
+        on_row(row_id)
+        if row_id == rows[1].id:
+            rig.player.stop()                   # lands after the loop's stop check
+    host.on_row = stop_on_breakpoint_row
+    thread = threading.Thread(target=rig.play)
+    thread.start()
+    thread.join(5)
+    assert not thread.is_alive()
+    assert host.paused == [] and rig.error is None
+    assert rig.clicks() == [("move", 1, 1)]
+
+
+def test_repeat_forever_with_no_row_playing_ends_at_once(no_spacing):
+    no_spacing.playback.repeat = 0
+    rows = [wait(10, enabled=False), click(1, 1)]
+    rig = Rig(rows, no_spacing, filter=("mouse_click",))
+    thread = threading.Thread(target=rig.play)
+    thread.start()
+    thread.join(5)
+    assert not thread.is_alive()
+    assert rig.error is None
+    assert rig.player.variables["iteration"] == 0
+    assert any("No row plays" in line for line in rig.host.logs)
+
+
 def test_breakpoint_resume_from_another_thread(no_spacing):
     host = FakeHost()
     paused = threading.Event()
@@ -1038,9 +1111,7 @@ def test_unscheduled_row_resets_the_schedule(no_spacing, plays):
     assert rig.clock.t == pytest.approx(0.140)
 
 
-def test_unwaited_exec_program_is_killed_when_playback_ends(no_spacing, tmp_path, plays):
-    pidfile = tmp_path / "pid"
-
+def _start_sleeper(pidfile):
     def start(ctx, row):
         ctx.run_command("sleep 30 & echo $! > '%s'; wait" % pidfile, False)
         deadline = time.monotonic() + 3
@@ -1048,7 +1119,39 @@ def test_unwaited_exec_program_is_killed_when_playback_ends(no_spacing, tmp_path
             assert time.monotonic() < deadline
             time.sleep(0.02)
         return Flow.NEXT
-    plays("exec_program", start)
+    return start
+
+
+def _running(pid):
+    try:
+        with open("/proc/%d/stat" % pid) as f:
+            return f.read().split()[2] != "Z"
+    except FileNotFoundError:
+        return False
+
+
+def test_unwaited_exec_program_outlives_a_run_that_reaches_the_end(no_spacing, tmp_path, plays):
+    pidfile = tmp_path / "pid"
+    plays("exec_program", _start_sleeper(pidfile))
+    rig = Rig([make_row(make("exec_program", command="x"))], no_spacing).play()
+    assert rig.error is None
+    pid = int(pidfile.read_text())
+    try:
+        time.sleep(0.1)
+        assert _running(pid)
+    finally:
+        os.kill(pid, signal.SIGKILL)
+
+
+def test_unwaited_exec_program_is_killed_when_playback_stops(no_spacing, tmp_path, plays):
+    pidfile = tmp_path / "pid"
+    start = _start_sleeper(pidfile)
+
+    def start_then_stop(ctx, row):
+        start(ctx, row)
+        ctx.stop()
+        return Flow.STOP
+    plays("exec_program", start_then_stop)
     rig = Rig([make_row(make("exec_program", command="x"))], no_spacing).play()
     assert rig.error is None
     pid = int(pidfile.read_text())
