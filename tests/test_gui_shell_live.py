@@ -1,0 +1,360 @@
+"""The real shell window, built off-screen, driven through its commands and pump.
+
+Runs only under Xvfb (``MACRO_RECORDER_LIVE_X=1``).  The platform objects are
+the conftest fakes, so nothing records, injects or grabs.
+"""
+
+from __future__ import annotations
+
+import time
+
+import pytest
+
+tk = pytest.importorskip("tkinter")
+
+from macro_recorder.gui.main_window import MainWindow
+from macro_recorder.gui.playback import Platform, PlatformFactories
+from macro_recorder.gui.settings import Settings
+from macro_recorder.gui.table import LOCKED_TAG, preset_command
+from macro_recorder.model import fileformat
+from macro_recorder.model.catalogue import make
+from macro_recorder.model.document import MacroDocument, make_row
+from macro_recorder.model.protocols import Mode
+from macro_recorder.platform.session import OwnWindows
+from tests.conftest import FakeHotkeys, FakeInput, FakeListener, FakeScreen, FakeStopKey, FakeWindows
+
+pytestmark = pytest.mark.live_x
+
+TIMEOUT_S = 10.0
+
+
+class Shell:
+    def __init__(self, window: MainWindow, own: OwnWindows) -> None:
+        self.window = window
+        self.own = own
+        self.messages: list[tuple[str, str]] = []
+        self.unsaved_answer = "cancel"
+        self.prompts: list[str] = []
+        window.show_message = lambda title, text: self.messages.append((title, text))
+        window.ask_unsaved = self._ask_unsaved
+
+    def _ask_unsaved(self, name: str) -> str:
+        self.prompts.append(name)
+        return self.unsaved_answer
+
+    def run_until(self, condition) -> None:
+        deadline = time.monotonic() + TIMEOUT_S
+        while not condition():
+            assert time.monotonic() < deadline, "timed out"
+            self.window.root.update()
+            time.sleep(0.01)
+
+    def ids(self) -> list[int]:
+        return [r.id for r in self.window.document.rows]
+
+
+@pytest.fixture
+def shell():
+    try:
+        root = tk.Tk(className="macro-recorder")
+    except tk.TclError as e:
+        pytest.skip("no display: %s" % e)
+    root.withdraw()
+    factories = PlatformFactories(windows=FakeWindows, input=FakeInput, screen=FakeScreen,
+                                  listener=FakeListener, stop_watcher=FakeStopKey,
+                                  grabber=FakeHotkeys)
+    own = OwnWindows()
+    window = MainWindow(root, Settings(), own_windows=own, platform=Platform(factories),
+                        save_settings=lambda settings: None)
+    rig = Shell(window, own)
+    root.update()
+    yield rig
+    if not window._closing:
+        window.close()
+
+
+def write_macro(path, rows) -> str:
+    fileformat.save(MacroDocument(rows), path)
+    return str(path)
+
+
+def wait_row(ms=1, **fields):
+    return make_row(make("wait", duration_ms=ms), **fields)
+
+
+def test_open_select_add_undo(shell, tmp_path):
+    w = shell.window
+    path = write_macro(tmp_path / "demo.json", [wait_row(), wait_row(label="second"), wait_row()])
+    w.open_path(path)
+    shell.run_until(lambda: True)
+    assert len(w.table.tree.get_children()) == 3
+    assert w.root.title() == "demo - Macro Recorder"
+    assert w.settings.ui.recent[0].endswith("demo.json")
+    first = shell.ids()[0]
+    w.table.select([first])
+    w.root.update()
+    assert w.table.selected_ids() == (first,)
+    assert w.commands.run(preset_command("Click"))
+    assert w.document.rows[1].type == "mouse_click"
+    assert w.table.selected_ids() == (w.document.rows[1].id,)
+    assert w.root.title() == "demo* - Macro Recorder"
+    assert w.count_label.cget("text") == "4 rows"
+    assert w.commands.run("edit.undo")
+    assert [r.type for r in w.document.rows] == ["wait"] * 3
+    assert len(w.table.tree.get_children()) == 3
+    assert w.root.title() == "demo - Macro Recorder"
+
+
+def test_single_key_insert_binding_respects_modifiers(shell):
+    w = shell.window
+    tree = w.table.tree
+    assert tree.bind("<KeyPress-c>") and tree.bind("<KeyPress-C>")
+    assert tree.bind("<Control-c>") and tree.bind("<Control-C>")
+    assert w.root.bind("<Control-z>") and w.root.bind("<F5>")
+    assert not tree.bind("<Control-z>")
+
+
+def test_alt_up_moves_the_selection(shell):
+    w = shell.window
+    w.document.append([wait_row(1), wait_row(2), wait_row(3)])
+    ids = shell.ids()
+    w.table.select([ids[2]])
+    w.root.update()
+    assert w.table.tree.bind("<Alt-Up>")
+    assert w.commands.run("edit.move_up")
+    assert shell.ids() == [ids[0], ids[2], ids[1]]
+    assert w.table.selected_ids() == (ids[2],)
+    assert [w.table.tree.set(str(i), "number") for i in shell.ids()] == ["1", "2", "3"]
+    assert w.commands.run("edit.move_down")
+    assert shell.ids() == ids
+
+
+def test_inline_label_edit_validates_and_commits(shell):
+    w = shell.window
+    w.root.deiconify()
+    w.document.append([wait_row(label="taken"), wait_row()])
+    target = shell.ids()[1]
+    w.root.update()
+    w.table.begin_label_edit(target)
+    w.root.update()
+    entry = w.table.editor_entry
+    assert entry is not None
+    entry.delete(0, "end")
+    entry.insert(0, "Taken")
+    w.root.update()
+    assert str(entry.cget("style")) == "Invalid.TEntry"
+    entry.event_generate("<Return>")
+    w.root.update()
+    assert w.table.editing                      # invalid: stays open
+    entry.delete(0, "end")
+    entry.insert(0, "loop")
+    w.root.update()
+    assert str(entry.cget("style")) == "TEntry"
+    entry.event_generate("<Return>")
+    w.root.update()
+    assert not w.table.editing
+    assert w.document.row(target).label == "loop"
+    assert w.table.tree.set(str(target), "label") == "loop"
+
+
+def test_document_change_cancels_the_inline_editor(shell):
+    w = shell.window
+    w.root.deiconify()
+    w.document.append([wait_row(), wait_row()])
+    w.root.update()
+    w.table.begin_comment_edit(shell.ids()[0])
+    w.root.update()
+    assert w.table.editing
+    w.document.append([wait_row()])
+    assert not w.table.editing
+
+
+def test_modes_set_widget_states(shell):
+    w = shell.window
+    w.document.append([wait_row()])
+    w.table.select(shell.ids())
+    w.root.update()
+    assert w.record_button.instate(["!disabled"])
+    assert w.play_stop_button.instate(["disabled"])
+    w.set_mode(Mode.PLAYING)
+    assert w.play_stop_button.instate(["!disabled"])
+    assert w.record_button.instate(["disabled"])
+    assert w.play_button.instate(["disabled"])
+    assert w.speed_box.instate(["disabled"])
+    assert str(w.table.tree.cget("selectmode")) == "none"
+    assert w.table.tree.bindtags()[0] == LOCKED_TAG
+    assert w.table.selected_ids() == ()
+    assert not w.commands.run("edit.delete")
+    w.set_mode(Mode.PAUSED)
+    assert w.play_button.instate(["!disabled"])
+    assert w.commands.enabled("play.stop")
+    assert not w.commands.enabled("file.save")
+    w.set_mode(Mode.IDLE)
+    assert str(w.table.tree.cget("selectmode")) == "extended"
+    assert w.table.selected_ids() == tuple(shell.ids())
+    assert w.speed_box.instate(["!disabled"])
+
+
+def test_session_problem_disables_record_and_play():
+    try:
+        root = tk.Tk(className="macro-recorder")
+    except tk.TclError as e:
+        pytest.skip("no display: %s" % e)
+    root.withdraw()
+    from macro_recorder.platform.session import SessionProblem
+    window = MainWindow(root, Settings(), own_windows=OwnWindows(), platform=None,
+                        session_problem=SessionProblem("wayland", "Wayland"),
+                        save_settings=lambda settings: None)
+    try:
+        root.update()
+        assert window.record_button.instate(["disabled"])
+        assert window.play_button.instate(["disabled"])
+        assert not window.commands.enabled("record.toggle")
+        assert window.commands.enabled("file.open")
+    finally:
+        window.close()
+
+
+def test_playback_through_the_real_pump(shell):
+    w = shell.window
+    rows = [wait_row(), make_row(make("var_set", var_name="n", expr="5"), breakpoint=True),
+            wait_row()]
+    w.document.append(rows)
+    ids = shell.ids()
+    w.table.select([ids[0]])
+    w.root.update()
+    assert w.commands.run("play.play")
+    assert w.mode is Mode.PLAYING
+    shell.run_until(lambda: w.mode is Mode.PAUSED)
+    assert w._play_text.get() == "Continue"
+    assert w.table.tree.set(str(ids[1]), "number").startswith(">")
+    assert "playing" in w.table.tree.item(str(ids[1]), "tags")
+    assert w.commands.run("play.play")
+    shell.run_until(lambda: w.mode is Mode.IDLE)
+    assert w._play_text.get() == "Play"
+    assert ("n", "5") in w.log_panel.variables()
+    assert "Playback finished" in w.log_panel.text()
+    assert w.table.selected_ids() == (ids[0],)
+    assert not w.table.tree.set(str(ids[1]), "number").startswith(">")
+    assert shell.messages == []
+
+
+def test_message_box_through_the_real_pump(shell):
+    w = shell.window
+    w.document.append([make_row(make("message_box", text="Go?", buttons="yes_no")), wait_row()])
+    w.commands.run("play.play")
+    shell.run_until(lambda: w._asks)
+    dialog = w._asks[0]
+    assert set(dialog.buttons) == {"yes", "no"}
+    dialog.choose("yes")
+    shell.run_until(lambda: w.mode is Mode.IDLE)
+    assert shell.messages == []
+
+
+def test_stop_closes_a_pending_message_box(shell):
+    w = shell.window
+    w.document.append([make_row(make("message_box", text="Go?")), wait_row()])
+    w.commands.run("play.play")
+    shell.run_until(lambda: w._asks)
+    w.commands.run("play.stop")
+    shell.run_until(lambda: w.mode is Mode.IDLE)
+    assert w._asks == []
+    assert "Playback stopped" in w.log_panel.text()
+
+
+def test_playback_error_is_reported_and_names_the_row(shell):
+    w = shell.window
+    w.document.append([wait_row(), make_row(make("goto", target="missing"))])
+    w.commands.run("play.play")
+    shell.run_until(lambda: w.mode is Mode.IDLE)
+    shell.run_until(lambda: shell.messages)
+    title, text = shell.messages[0]
+    assert title == "Playback stopped" and text.startswith("Row 2:")
+    assert w.table.selected_ids() == (shell.ids()[1],)
+
+
+def test_unsaved_prompt_on_new(shell, tmp_path):
+    w = shell.window
+    w.document.append([wait_row()])
+    shell.unsaved_answer = "cancel"
+    w.commands.run("file.new")
+    assert shell.prompts == ["Untitled"] and len(w.document.rows) == 1
+    shell.unsaved_answer = "discard"
+    w.commands.run("file.new")
+    assert w.document.rows == () and not w.document.dirty
+    assert w.root.title() == "Untitled - Macro Recorder"
+
+
+def test_unsaved_prompt_save_writes_the_file(shell, tmp_path):
+    w = shell.window
+    path = write_macro(tmp_path / "keep.json", [wait_row()])
+    w.open_path(path)
+    w.document.append([wait_row()])
+    shell.unsaved_answer = "save"
+    w.commands.run("file.new")
+    assert shell.prompts == ["keep"]
+    assert len(fileformat.load(path).rows) == 2
+    assert w.document.rows == ()
+
+
+def test_missing_recent_file_is_reported_and_dropped(shell, tmp_path):
+    w = shell.window
+    path = write_macro(tmp_path / "gone.json", [wait_row()])
+    w.open_path(path)
+    (tmp_path / "gone.json").unlink()
+    w.commands.run("file.new")
+    w.commands.run("file.open_recent", path)
+    shell.run_until(lambda: shell.messages)
+    assert shell.messages[0][0] == "Open"
+    assert all(not p.endswith("gone.json") for p in w.settings.ui.recent)
+
+
+def test_paste_round_trip(shell):
+    w = shell.window
+    w.document.append([wait_row(label="a"), wait_row()])
+    ids = shell.ids()
+    w.table.select(ids)
+    w.commands.run("edit.copy")
+    w.table.select([ids[1]])
+    w.commands.run("edit.paste")
+    assert len(w.document.rows) == 4
+    assert w.document.rows[2].label == ""          # duplicate label cleared
+    assert "already used" in w.log_panel.text()
+
+
+def test_toplevels_register_in_own_windows(shell):
+    w = shell.window
+    w.root.deiconify()
+    shell.run_until(lambda: w.root.winfo_ismapped())
+    w.root.update()
+    assert shell.own.ids()
+    top = tk.Toplevel(w.root)
+    shell.run_until(lambda: top.winfo_ismapped())
+    w.root.update()
+    count = len(shell.own.ids())
+    top.destroy()
+    w.root.update()
+    assert len(shell.own.ids()) == count - 1
+
+
+def test_targeting_round_trip(shell):
+    w = shell.window
+    delivered: list = []
+
+    class FakeSession:
+        def __init__(self, on_done):
+            self.on_done = on_done
+
+        def start(self):
+            from macro_recorder.gui.targeting import Capture
+            self.on_done(Capture(10, 20, "#ff0000"), None)
+
+        def cancel(self):
+            pass
+
+    w.targeting_factory = FakeSession
+    w.request_targeting(("x", "y"), delivered.append)
+    assert w.mode is Mode.TARGETING
+    shell.run_until(lambda: delivered)
+    assert delivered == [{"x": 10, "y": 20, "colour": "#ff0000"}]
+    assert w.mode is Mode.IDLE
