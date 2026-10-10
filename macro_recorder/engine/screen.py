@@ -11,6 +11,7 @@ maths, template scoring on images in memory) need no display.
 from __future__ import annotations
 
 import os
+import threading
 from typing import Any, Callable
 
 from macro_recorder.model.protocols import Monitor, Rect
@@ -50,15 +51,6 @@ def rect_from_corners(x: float, y: float, x2: float, y2: float) -> Rect:
     """The rectangle between two opposite corners given in any order."""
     left, right = sorted((int(round(x)), int(round(x2))))
     top, bottom = sorted((int(round(y)), int(round(y2))))
-    return Rect(left, top, right - left, bottom - top)
-
-
-def intersect(a: Rect, b: Rect) -> Rect | None:
-    """The overlap of two rectangles, or None when they do not overlap."""
-    left, top = max(a.left, b.left), max(a.top, b.top)
-    right, bottom = min(a.right, b.right), min(a.bottom, b.bottom)
-    if right <= left or bottom <= top:
-        return None
     return Rect(left, top, right - left, bottom - top)
 
 
@@ -144,14 +136,16 @@ def _default_mss() -> Any:
 class XScreen:
     """The ``Screen`` Protocol on the X server named by ``$DISPLAY``.
 
-    Each call opens and closes its own mss session, so one instance is safe
-    to share between the player thread and the GUI thread.
+    Each call opens and closes its own mss session and the template cache is
+    locked, so one instance is safe to share between the player thread and
+    the GUI thread.
     ``mss_factory`` returns an mss-like context manager; tests pass a fake.
     """
 
     def __init__(self, mss_factory: Callable[[], Any] = _default_mss) -> None:
         self._mss_factory = mss_factory
         self._templates: dict[tuple[str, int], Any] = {}
+        self._templates_lock = threading.Lock()
 
     def capture(self, rect: Rect) -> Any:
         """A PIL RGB image of ``rect`` in screen pixels."""
@@ -206,7 +200,8 @@ class XScreen:
         if not path or not os.path.isfile(path):
             raise ScreenError("Image file not found: %s" % (path or "(none)"))
         key = (os.path.abspath(path), os.stat(path).st_mtime_ns)
-        cached = self._templates.get(key)
+        with self._templates_lock:
+            cached = self._templates.get(key)
         if cached is not None:
             return cached
         image_mod = _import_pil_image()
@@ -215,6 +210,8 @@ class XScreen:
                 needle = img.convert("RGB")
         except OSError as e:
             raise ScreenError("Could not read image file %s: %s" % (path, e)) from e
-        self._templates = {k: v for k, v in self._templates.items() if k[0] != key[0]}
-        self._templates[key] = needle
+        with self._templates_lock:
+            for stale in [k for k in self._templates if k[0] == key[0]]:
+                del self._templates[stale]
+            self._templates[key] = needle
         return needle

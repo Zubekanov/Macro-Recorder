@@ -144,6 +144,17 @@ def test_click_down_and_up_halves_use_hold_bookkeeping():
     assert ctx.sleeps == []
 
 
+def test_click_on_a_button_held_by_a_down_row_keeps_it_held():
+    ctx = FakePlayContext()
+    play(ctx, row("mouse_click", x=0, y=0, action="down"))
+    play(ctx, row("mouse_click", x=0, y=0))
+    assert ctx.held_buttons == ["left"]
+    assert [a for a in ctx.input.actions if a[0] != "move"] == [("press_button", "left")]
+    play(ctx, row("mouse_click", x=0, y=0, action="up"))
+    assert ctx.held_buttons == []
+    assert ctx.input.actions[-1] == ("release_button", "left")
+
+
 # ---------------------------------------------------------------- mouse_scroll
 
 def test_scroll_without_position_does_not_move():
@@ -174,6 +185,22 @@ def test_scroll_stop_between_notches():
     ctx = FakePlayContext(stop_on_sleep=1)
     assert play(ctx, row("mouse_scroll", dy=5)) is Flow.STOP
     assert ctx.input.actions == [("scroll", 0, 1)]
+
+
+def test_scroll_stop_with_no_notch_interval_on_a_huge_count():
+    ctx = FakePlayContext()
+    ctx.variables["n"] = 10 ** 9
+    scrolls = []
+
+    def scroll(dx, dy):
+        scrolls.append((dx, dy))
+        if len(scrolls) == 3:
+            ctx.stop()
+
+    ctx.input.scroll = scroll
+    assert play(ctx, row("mouse_scroll", dy="n", notch_ms=0)) is Flow.STOP
+    assert scrolls == [(0, 1)] * 3
+    assert ctx.sleeps == []
 
 
 # ------------------------------------------------------------------- describe

@@ -20,10 +20,8 @@ def row(type_, **params):
 
 
 @pytest.fixture
-def ctx(monkeypatch):
-    c = FakePlayContext()
-    monkeypatch.setattr(wait, "clock", c.clock.now)
-    return c
+def ctx():
+    return FakePlayContext()
 
 
 # ------------------------------------------------------------------------ wait
@@ -110,6 +108,17 @@ def test_pixel_timeout_abort_message_and_timing(ctx):
     assert result == Abort("pixel (5, 6) did not become #ff0000 within 120 ms")
     assert ctx.sleeps == [(50, False), (50, False), (pytest.approx(20), False)]
     assert ctx.clock.now() == pytest.approx(0.12)
+
+
+def test_pixel_timeout_counts_read_time_on_the_context_clock(ctx):
+    def slow_pixel(x, y):
+        ctx.clock.advance(0.03)
+        return (0, 0, 0)
+
+    ctx.screen.pixel = slow_pixel
+    assert isinstance(play(ctx, row("wait_pixel", x=0, y=0, colour="#ffffff", timeout_ms=100)), Abort)
+    # Read 30 ms, poll 50, read 30 (110 ms > 100): one poll only.
+    assert ctx.sleeps == [(50, False)]
 
 
 def test_pixel_timeout_continue_logs(ctx):

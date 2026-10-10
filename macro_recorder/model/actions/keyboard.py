@@ -121,7 +121,9 @@ def char_delays(count: int, char_delay_ms: float, duration_ms: float, humanise: 
 
     ``char_delay_ms`` wins when set; otherwise ``duration_ms`` is spread
     evenly.  Humanising multiplies each delay by a factor drawn uniformly
-    from 1 - HUMANISE_JITTER to 1 + HUMANISE_JITTER.
+    from 1 - HUMANISE_JITTER to 1 + HUMANISE_JITTER.  With no delay set
+    there is nothing to jitter, which is why the Details panel disables
+    Humanise until one of the two delays is set.
     """
     if count <= 0:
         return []
@@ -156,7 +158,8 @@ TYPE_TEXT = register(ActionSpec(
                  enabled_when=lambda v: not v.get("duration_ms")),
         duration("duration_ms", "Total duration", 0,
                  enabled_when=lambda v: not v.get("char_delay_ms")),
-        boolean("humanise", "Humanise timing", False),
+        boolean("humanise", "Humanise timing", False,
+                enabled_when=lambda v: bool(v.get("char_delay_ms") or v.get("duration_ms"))),
     ),
     presets=(Preset("Text", "T", lambda: make("type_text", text="text")),),
     describe=_describe_text, play=_play_text,

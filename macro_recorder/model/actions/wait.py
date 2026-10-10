@@ -8,8 +8,6 @@ from __future__ import annotations
 
 import random
 import re
-import time
-from typing import Callable
 
 from macro_recorder.model.actions._common import (
     choice, duration, fmt_ms, fmt_point, number, on_timeout_fields,
@@ -23,9 +21,6 @@ from macro_recorder.model.protocols import OverlayShape, PlayContext
 
 # Source of random wait lengths; tests replace it with a seeded or stub generator.
 rng: random.Random = random.Random()
-
-# Monotonic seconds for the pixel timeout; tests replace it with a fake clock.
-clock: Callable[[], float] = time.monotonic
 
 PIXEL_POLL_MS = 50
 
@@ -95,7 +90,11 @@ def _overlay_pixel(row: Row) -> OverlayShape | None:
 
 
 def _play_pixel(ctx: PlayContext, row: Row) -> Flow | Jump | Abort:
-    """Poll the pixel every PIXEL_POLL_MS until it matches or the timeout passes."""
+    """Poll the pixel every PIXEL_POLL_MS until it matches or the timeout passes.
+
+    The deadline runs on ``ctx.now()``, the engine's clock, so it counts the
+    time the pixel reads take as well as the polls.
+    """
     e = row.event
     try:
         wanted = parse_colour(e["colour"])
@@ -106,11 +105,11 @@ def _play_pixel(ctx: PlayContext, row: Row) -> Flow | Jump | Abort:
     tolerance = int(e["colour_tolerance"])
     equals = e["mode"] == "equals"
     timeout_ms = max(0.0, ctx.resolve(e["timeout_ms"]))
-    deadline = clock() + timeout_ms / 1000.0
+    deadline = ctx.now() + timeout_ms / 1000.0
     while True:
         if colour_matches(ctx.screen.pixel(x, y), wanted, tolerance) == equals:
             return Flow.NEXT
-        remaining_ms = (deadline - clock()) * 1000.0
+        remaining_ms = (deadline - ctx.now()) * 1000.0
         if remaining_ms <= 0:
             break
         if ctx.sleep(min(PIXEL_POLL_MS, remaining_ms), scaled=False):

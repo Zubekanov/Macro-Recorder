@@ -1,6 +1,7 @@
 """engine/screen.py: pure helpers and XScreen over a fake mss (no real screen)."""
 
 import os
+import subprocess
 import sys
 import types
 from unittest import mock
@@ -8,9 +9,8 @@ from unittest import mock
 import pytest
 from PIL import Image, ImageDraw
 
-from macro_recorder.engine import screen
 from macro_recorder.engine.screen import (
-    ScreenError, XScreen, best_match, intersect, monitor_rect, ocr_image, rect_from_corners,
+    ScreenError, XScreen, best_match, monitor_rect, ocr_image, rect_from_corners,
     text_similarity,
 )
 from macro_recorder.model.protocols import Monitor, Rect
@@ -115,11 +115,6 @@ def test_rect_from_corners_any_order():
     assert rect_from_corners(110, 70, 10, 20) == Rect(10, 20, 100, 50)
     assert rect_from_corners(10, 20, 110, 70) == Rect(10, 20, 100, 50)
     assert rect_from_corners(10.4, 20.6, 10.4, 20.6) == Rect(10, 21, 0, 0)
-
-
-def test_intersect():
-    assert intersect(Rect(0, 0, 100, 100), Rect(50, 60, 100, 100)) == Rect(50, 60, 50, 40)
-    assert intersect(Rect(0, 0, 10, 10), Rect(10, 0, 10, 10)) is None
 
 
 def test_monitor_rect():
@@ -302,8 +297,13 @@ def test_xscreen_ocr_captures_the_rect_then_reads(xscreen, fake_mss):
 
 
 def test_module_import_is_lazy():
-    assert screen.XScreen.__init__.__defaults__[0] is screen._default_mss
-    assert "cv2" not in screen.__dict__ and "mss" not in screen.__dict__
+    code = ("import sys, macro_recorder.engine.screen; "
+            "print(sorted({'cv2', 'mss', 'pytesseract', 'numpy', 'PIL'} & set(sys.modules)))")
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = dict(os.environ, PYTHONPATH=root)
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env,
+                         check=True)
+    assert out.stdout.strip() == "[]"
 
 
 # ---------------------------------------------------------------------------

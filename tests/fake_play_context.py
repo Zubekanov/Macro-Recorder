@@ -2,8 +2,10 @@
 
 Numbers resolve as themselves and a bare variable name resolves from
 ``variables``; ``coord`` adds a configurable frame delta; ``sleep`` records
-each request and advances a FakeClock; ``stop_on_sleep`` makes the Nth sleep
-(1-based) report a stop.
+each request and advances a FakeClock, which ``now`` reads; ``stop_on_sleep``
+makes the Nth sleep (1-based) report a stop.  Holds are reference-counted:
+only the first hold of a name presses it and only the last unhold releases
+it, and an unhold of a name that is not held releases it anyway.
 """
 
 from __future__ import annotations
@@ -82,6 +84,9 @@ class FakePlayContext:
             self._stopped = True
         return self._stopped
 
+    def now(self) -> float:
+        return self.clock.now()
+
     def stopped(self) -> bool:
         return self._stopped
 
@@ -94,22 +99,26 @@ class FakePlayContext:
     # Holds ----------------------------------------------------------------
 
     def hold_key(self, name: str) -> None:
-        self.input.press_key(name)
+        if name not in self.held_keys:
+            self.input.press_key(name)
         self.held_keys.append(name)
 
     def unhold_key(self, name: str) -> None:
-        self.input.release_key(name)
         if name in self.held_keys:
             self.held_keys.remove(name)
+        if name not in self.held_keys:
+            self.input.release_key(name)
 
     def hold_button(self, name: str) -> None:
-        self.input.press_button(name)
+        if name not in self.held_buttons:
+            self.input.press_button(name)
         self.held_buttons.append(name)
 
     def unhold_button(self, name: str) -> None:
-        self.input.release_button(name)
         if name in self.held_buttons:
             self.held_buttons.remove(name)
+        if name not in self.held_buttons:
+            self.input.release_button(name)
 
     # Engine services ------------------------------------------------------
 

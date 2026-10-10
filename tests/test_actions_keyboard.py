@@ -81,6 +81,17 @@ def test_empty_key_aborts():
     assert ctx.input.actions == []
 
 
+def test_combo_over_a_key_held_by_key_press_keeps_it_held():
+    ctx = FakePlayContext()
+    play(ctx, row("key_press", key="Shift_L"))
+    play(ctx, row("key_combo", keys="shift+a", hold_ms=0))
+    assert ctx.held_keys == ["Shift_L"]
+    assert ctx.input.actions == [("press_key", "Shift_L"), ("press_key", "a"), ("release_key", "a")]
+    play(ctx, row("key_release", key="Shift_L"))
+    assert ctx.held_keys == []
+    assert ctx.input.actions[-1] == ("release_key", "Shift_L")
+
+
 # ------------------------------------------------------------------- type_text
 
 def typed(ctx):
@@ -137,6 +148,13 @@ def test_humanise_bounds_are_exact():
 
 def test_humanise_without_delay_types_at_once():
     assert keyboard.char_delays(3, 0, 0, True, random.Random(0)) == [0.0, 0.0, 0.0]
+
+
+def test_humanise_is_enabled_only_with_a_delay():
+    field = next(f for f in keyboard.TYPE_TEXT.fields if f.keys == ("humanise",))
+    assert not field.enabled_when({"char_delay_ms": 0, "duration_ms": 0, "humanise": True})
+    assert field.enabled_when({"char_delay_ms": 20, "duration_ms": 0})
+    assert field.enabled_when({"char_delay_ms": 0, "duration_ms": "t * 2"})
 
 
 def test_stop_during_typing():

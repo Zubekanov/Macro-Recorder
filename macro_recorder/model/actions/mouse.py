@@ -242,18 +242,24 @@ def _sign(value: int) -> int:
 
 
 def _play_scroll(ctx: PlayContext, row: Row) -> Flow:
-    """Move when a position is set, then one notch at a time: vertical, then horizontal."""
+    """Move when a position is set, then one notch at a time: vertical, then horizontal.
+
+    The stop flag is checked before every notch, so a huge count from an
+    expression stays interruptible even with no notch interval.
+    """
     e = row.event
     if e["x"] is not None and e["y"] is not None:
         ctx.input.move(*ctx.coord(e["x"], e["y"]))
     dx = ctx.resolve_int(e["dx"])
     dy = ctx.resolve_int(e["dy"])
-    notches = [(0, _sign(dy))] * abs(dy) + [(_sign(dx), 0)] * abs(dx)
     notch_ms = max(0.0, ctx.resolve(e["notch_ms"]))
-    for i, (nx, ny) in enumerate(notches):
-        if i and notch_ms > 0 and ctx.sleep(notch_ms):
-            return Flow.STOP
-        ctx.input.scroll(nx, ny)
+    first = True
+    for count, notch in ((abs(dy), (0, _sign(dy))), (abs(dx), (_sign(dx), 0))):
+        for _ in range(count):
+            if ctx.stopped() or (not first and notch_ms > 0 and ctx.sleep(notch_ms)):
+                return Flow.STOP
+            ctx.input.scroll(*notch)
+            first = False
     return Flow.NEXT
 
 
