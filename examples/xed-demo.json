@@ -1,20 +1,87 @@
 {
-  "version": 3,
-  "path_mode": "recorded",
-  "rows": [
-    {"comment": "Bring up the text editor, starting it if needed",
-     "events": [{"type": "window_focus", "window": " - xed$", "match_mode": "regex", "launch": "xed",
-                 "rect": [200, 120, 800, 600], "client_rect": [200, 150, 800, 570]}]},
-    {"comment": "Click into the document",
-     "events": [{"type": "mouse_click", "x": 600, "y": 400}]},
-    {"label": "again",
-     "events": [{"type": "key_combo", "keys": "ctrl+End"}]},
-    {"events": [{"type": "type_text", "text": "Line {loop} typed by Macro Recorder\n",
-                 "char_delay_ms": 20}]},
-    {"events": [{"type": "wait", "duration_ms": 300}]},
-    {"comment": "Three lines in all",
-     "events": [{"type": "repeat", "target": "again", "count": 3}]},
-    {"events": [{"type": "wait_pixel", "x": 210, "y": 160, "colour": "#ffffff",
-                 "timeout_ms": 2000, "on_timeout": "continue"}]}
-  ]
+ "version": 3,
+ "path_mode": "recorded",
+ "rows": [
+  {
+   "comment": "Bring up xed (its new-file title is \"Unsaved Document 1\"), starting it if needed",
+   "events": [
+    {
+     "type": "window_focus",
+     "window": "Unsaved Document",
+     "match_mode": "substring",
+     "launch": "xed",
+     "rect": [
+      200,
+      120,
+      800,
+      600
+     ],
+     "client_rect": [
+      200,
+      150,
+      800,
+      570
+     ]
+    }
+   ]
+  },
+  {
+   "comment": "Click into the document",
+   "events": [
+    {
+     "type": "mouse_click",
+     "x": 600,
+     "y": 400
+    }
+   ]
+  },
+  {
+   "label": "again",
+   "events": [
+    {
+     "type": "key_combo",
+     "keys": "ctrl+End"
+    }
+   ]
+  },
+  {
+   "events": [
+    {
+     "type": "type_text",
+     "text": "Line {loop} typed by Macro Recorder\n",
+     "char_delay_ms": 20
+    }
+   ]
+  },
+  {
+   "events": [
+    {
+     "type": "wait",
+     "duration_ms": 300
+    }
+   ]
+  },
+  {
+   "comment": "Three lines in all",
+   "events": [
+    {
+     "type": "repeat",
+     "target": "again",
+     "count": 3
+    }
+   ]
+  },
+  {
+   "events": [
+    {
+     "type": "wait_pixel",
+     "x": 210,
+     "y": 160,
+     "colour": "#ffffff",
+     "timeout_ms": 2000,
+     "on_timeout": "continue"
+    }
+   ]
+  }
+ ]
 }
