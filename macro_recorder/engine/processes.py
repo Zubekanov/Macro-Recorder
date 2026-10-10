@@ -44,15 +44,18 @@ def child_env(environ: dict[str, str] | None = None) -> dict[str, str]:
 
 
 def run(command: str, cwd: str | None, wait: bool, timeout_ms: float,
-        stop_event: threading.Event) -> int | None:
+        stop_event: threading.Event,
+        children: list[subprocess.Popen] | None = None) -> int | None:
     """Run ``command`` through ``/bin/sh``.
 
     ``cwd`` falls back to ``$HOME`` when it is None or not a directory.
-    Without ``wait`` the command is left running and None is returned.  With
-    ``wait`` the exit code is returned; ``timeout_ms`` > 0 limits the wait.
-    When ``stop_event`` is set, or the timeout passes, the process group gets
-    SIGTERM (SIGKILL two seconds later).  A stop returns None; a timeout
-    raises ProcessError, as does a command that cannot be started.
+    Without ``wait`` the command is left running and None is returned; when
+    ``children`` is given the process is appended to it, so the caller can
+    end its group later with :func:`terminate`.  With ``wait`` the exit code
+    is returned; ``timeout_ms`` > 0 limits the wait.  When ``stop_event`` is
+    set, or the timeout passes, the process group is terminated.  A stop
+    returns None; a timeout raises ProcessError, as does a command that
+    cannot be started.
     """
     if not command.strip():
         raise ProcessError("The command is empty")
@@ -65,6 +68,8 @@ def run(command: str, cwd: str | None, wait: bool, timeout_ms: float,
         raise ProcessError("Could not run %r: %s" % (command, e)) from e
     if not wait:
         threading.Thread(target=proc.wait, name="reaper-%d" % proc.pid, daemon=True).start()
+        if children is not None:
+            children.append(proc)
         return None
     deadline = time.monotonic() + timeout_ms / 1000.0 if timeout_ms and timeout_ms > 0 else None
     while True:
@@ -73,29 +78,47 @@ def run(command: str, cwd: str | None, wait: bool, timeout_ms: float,
         except subprocess.TimeoutExpired:
             pass
         if stop_event.is_set():
-            _terminate(proc)
+            terminate([proc])
             return None
         if deadline is not None and time.monotonic() >= deadline:
-            _terminate(proc)
+            terminate([proc])
             raise ProcessError("%r did not finish within %d ms" % (command, int(timeout_ms)))
 
 
-def _terminate(proc: subprocess.Popen) -> None:
-    """SIGTERM the process group, then SIGKILL it if it does not exit."""
-    for sig in (signal.SIGTERM, signal.SIGKILL):
+def terminate(procs: list[subprocess.Popen]) -> None:
+    """End the process groups of ``procs``: SIGTERM, then SIGKILL after the grace period.
+
+    The groups are signalled together.  A group counts as gone only when no
+    member is left, so a grandchild that ignores SIGTERM is killed even after
+    its group leader has exited.
+    """
+    groups = [p for p in procs if _signal_group(p, signal.SIGTERM)]
+    deadline = time.monotonic() + TERM_GRACE_S
+    while groups and time.monotonic() < deadline:
+        time.sleep(POLL_S)
+        groups = [p for p in groups if _group_alive(p)]
+    for p in groups:
+        _signal_group(p, signal.SIGKILL)
+    for p in procs:
         try:
-            os.killpg(proc.pid, sig)
-        except ProcessLookupError:
-            break
-        except PermissionError as e:
-            log.warning("Could not signal process group %d: %s", proc.pid, e)
-            break
-        try:
-            proc.wait(timeout=TERM_GRACE_S)
-            return
+            p.wait(timeout=TERM_GRACE_S)
         except subprocess.TimeoutExpired:
-            continue
+            log.warning("Process %d did not exit after SIGKILL", p.pid)
+
+
+def _signal_group(proc: subprocess.Popen, sig: int) -> bool:
+    """Send ``sig`` to the group led by ``proc``.  False when the group is gone."""
     try:
-        proc.wait(timeout=TERM_GRACE_S)
-    except subprocess.TimeoutExpired:
-        log.warning("Process %d did not exit after SIGKILL", proc.pid)
+        os.killpg(proc.pid, sig)
+    except ProcessLookupError:
+        return False
+    except PermissionError as e:
+        log.warning("Could not signal process group %d: %s", proc.pid, e)
+        return False
+    return True
+
+
+def _group_alive(proc: subprocess.Popen) -> bool:
+    """True while any member of the group led by ``proc`` exists (the leader is reaped first)."""
+    proc.poll()
+    return _signal_group(proc, 0)

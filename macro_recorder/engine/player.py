@@ -15,6 +15,7 @@ import math
 import os
 import random
 import re
+import subprocess
 import threading
 import time
 from collections.abc import Iterator, MutableMapping
@@ -41,6 +42,10 @@ SLEEP_SLICE_S = 0.05            # longest uninterrupted sleep, so stop stays res
 BURST_ROWS = 10_000             # rows per second without a wait before throttling
 BURST_SLEEP_S = 0.001
 REPEAT_COUNTER = "counter"      # row_state key a repeat row keeps its pass counter in
+# Rows whose length the schedule cannot know; the clock resets after them.
+# Window rows, message boxes and waited commands reset where they happen.
+UNSCHEDULED = frozenset({EventType.WAIT_PIXEL, EventType.OCR_READ,
+                         EventType.MATCH_IMAGE, EventType.MATCH_TEXT})
 
 Outcome = Flow | Jump | Abort
 _ROW_PREFIX = re.compile(r"^Row \d+: ")
@@ -165,6 +170,8 @@ class Player:
         speed = float(settings.playback.speed)
         if not speed > 0:
             raise ValueError("Speed must be above 0, got %r" % settings.playback.speed)
+        if int(settings.playback.repeat) < 0:
+            raise ValueError("Repeat must be 0 or more, got %r" % settings.playback.repeat)
         self._stop = threading.Event()
         self._resume = threading.Event()
         self._clock: Clock = clock if clock is not None else _SystemClock(self._stop)
@@ -208,8 +215,9 @@ class Player:
         self._row_states: dict[int, dict] = {}
         self._launched: set[int] = set()
         self._missing: set[int] = set()
-        self._held_keys: list[str] = []
+        self._held_keys: list[str] = []         # one entry per hold, so holds nest
         self._held_buttons: list[str] = []
+        self._children: list[subprocess.Popen] = []     # unwaited exec_program commands
         self._start = 0.0
         self._paused_s = 0.0
         self._due = 0.0
@@ -249,6 +257,11 @@ class Player:
                 log.exception("Releasing held input failed")
             self._held_keys.clear()
             self._held_buttons.clear()
+            if self._children:
+                try:
+                    processes.terminate(self._children)
+                except Exception:   # noqa: BLE001
+                    log.exception("Ending exec_program commands failed")
             self._host.on_finished(error)
 
     def stop(self) -> None:
@@ -299,22 +312,29 @@ class Player:
         return Flow.NEXT
 
     def _step(self, index: int, row: Row) -> Outcome:
-        """Breakpoint, delay, window context, then the row's own play."""
+        """Window context, breakpoint, delay, then the row's own play.
+
+        The context comes first so a breakpoint on the first row of a group
+        pauses in, and re-activates, that group's window.
+        """
         self.row_id = row.id
-        self._host.on_row(row.id)
-        if row.breakpoint and self._pause(row):
-            return Flow.STOP
-        delay_ms = max(row.delay_ms, self.settings.playback.min_spacing_ms)
-        if self._scheduled_wait(delay_ms / 1000.0 / self.speed):
-            return Flow.STOP
         try:
+            self._host.on_row(row.id)
             outcome = self._ensure_context(index, row)
             if outcome is not Flow.NEXT:
                 return outcome
+            if row.breakpoint and self._pause(row):
+                return Flow.STOP
+            delay_ms = max(row.delay_ms, self.settings.playback.min_spacing_ms)
+            if self._scheduled_wait(delay_ms / 1000.0 / self.speed):
+                return Flow.STOP
             self._executed += 1
             spec = spec_for(row)
             self._host.on_log("[%d] %s" % (index + 1, self._describe(spec, row)))
-            return spec.play(self, row)
+            outcome = spec.play(self, row)
+            if row.type in UNSCHEDULED:
+                self._reset_schedule()
+            return outcome
         except (expressions.ExpressionError, ArithmeticError, PlaybackError, processes.ProcessError) as e:
             return Abort(str(e))
         except Exception as e:      # noqa: BLE001 - a row bug aborts the run with its number
@@ -561,36 +581,44 @@ class Player:
 
     def _release_held(self) -> None:
         """Release held buttons and keys but remember them."""
-        for b in self._held_buttons:
+        for b in dict.fromkeys(self._held_buttons):
             self.input.release_button(b)
-        for k in self._held_keys:
+        for k in dict.fromkeys(self._held_keys):
             self.input.release_key(k)
 
     def _restore_after_interruption(self) -> None:
         self.reactivate_context()
-        for k in self._held_keys:
+        for k in dict.fromkeys(self._held_keys):
             self.input.press_key(k)
-        for b in self._held_buttons:
+        for b in dict.fromkeys(self._held_buttons):
             self.input.press_button(b)
         self._reset_schedule()
 
     def hold_key(self, name: str) -> None:
-        """Note that the action pressed ``name`` and leaves it held."""
+        """Press key ``name`` unless a hold already has it down, and count the hold."""
         if name not in self._held_keys:
-            self._held_keys.append(name)
+            self.input.press_key(name)
+        self._held_keys.append(name)
 
     def unhold_key(self, name: str) -> None:
+        """Drop one hold of ``name``; release the key when no hold remains."""
         if name in self._held_keys:
             self._held_keys.remove(name)
+        if name not in self._held_keys:
+            self.input.release_key(name)
 
     def hold_button(self, name: str) -> None:
-        """Note that the action pressed button ``name`` and leaves it held."""
+        """Press button ``name`` unless a hold already has it down, and count the hold."""
         if name not in self._held_buttons:
-            self._held_buttons.append(name)
+            self.input.press_button(name)
+        self._held_buttons.append(name)
 
     def unhold_button(self, name: str) -> None:
+        """Drop one hold of ``name``; release the button when no hold remains."""
         if name in self._held_buttons:
             self._held_buttons.remove(name)
+        if name not in self._held_buttons:
+            self.input.release_button(name)
 
     # ---------------------------------------------------------------- timing
 
@@ -633,6 +661,10 @@ class Player:
         stopped = self._sleep(ms / 1000.0)
         self._reset_schedule()
         return stopped
+
+    def now(self) -> float:
+        """The engine clock, in seconds."""
+        return self._clock.now()
 
     def stopped(self) -> bool:
         return self._stop.is_set()
@@ -677,8 +709,7 @@ class Player:
             return float(default)
         if isinstance(value, (int, float)):
             return float(value)
-        result = expressions.resolve_number(value, self.variables)
-        return float(default) if result is None else float(result)
+        return float(expressions.resolve_number(value, self.variables))
 
     def resolve_int(self, value: Any, default: int = 0) -> int:
         return int(round(self.resolve(value, default)))
@@ -740,7 +771,8 @@ class Player:
     def run_command(self, command: str, wait: bool, timeout_ms: float = 0) -> int | None:
         """Run a shell command in the macro's folder (or $HOME).  Not scaled by speed."""
         try:
-            return processes.run(command, self.document_dir, wait, timeout_ms, self._stop)
+            return processes.run(command, self.document_dir, wait, timeout_ms, self._stop,
+                                 self._children)
         finally:
             if wait:
                 self._reset_schedule()

@@ -43,8 +43,8 @@ def _wait(ctx, row):
 def _click(ctx, row):
     x, y = ctx.coord(row.event["x"], row.event["y"])
     ctx.input.move(x, y)
-    ctx.input.press_button(row.event["button"])
-    ctx.input.release_button(row.event["button"])
+    ctx.hold_button(row.event["button"])
+    ctx.unhold_button(row.event["button"])
     return Flow.NEXT
 
 
@@ -84,13 +84,11 @@ def _repeat(ctx, row):
 
 
 def _key_press(ctx, row):
-    ctx.input.press_key(row.event["key"])
     ctx.hold_key(row.event["key"])
     return Flow.NEXT
 
 
 def _key_release(ctx, row):
-    ctx.input.release_key(row.event["key"])
     ctx.unhold_key(row.event["key"])
     return Flow.NEXT
 
@@ -928,3 +926,127 @@ def test_exec_failure_aborts(no_spacing):
     rows = [make_row(make("exec_program", command="sleep 5", wait_exit=True, timeout_ms=100))]
     rig = Rig(rows, no_spacing).play()
     assert rig.error == "Row 1: 'sleep 5' did not finish within 100 ms"
+
+
+# ---------------------------------------------------------------------------
+# Holds, clock, breakpoints in a new group, errors, repeat setting
+# ---------------------------------------------------------------------------
+
+def test_holds_press_release_and_nest(no_spacing, plays):
+    def combo(ctx, row):
+        ctx.hold_key("Shift_L")
+        ctx.hold_key("a")
+        ctx.unhold_key("a")
+        ctx.unhold_key("Shift_L")
+        return Flow.NEXT
+    plays("key_combo", combo)
+    rows = [make_row(make("key_press", key="Shift_L")), make_row(make("key_combo", keys="shift+a")),
+            make_row(make("key_release", key="Shift_L"))]
+    rig = Rig(rows, no_spacing).play()
+    assert rig.error is None
+    # Shift held by key_press stays down through the combo, released only by key_release.
+    assert rig.input.actions == [("press_key", "Shift_L"), ("press_key", "a"), ("release_key", "a"),
+                                 ("release_key", "Shift_L")]
+
+
+def test_held_buttons_are_released_on_exit(no_spacing, plays):
+    def down(ctx, row):
+        ctx.hold_button("left")
+        return Flow.NEXT
+    plays("mouse_click", down)
+    rig = Rig([click(1, 1)], no_spacing).play()
+    assert rig.error is None
+    assert rig.input.actions[0] == ("press_button", "left")
+    assert rig.input.held_buttons == set()
+
+
+def test_now_follows_the_engine_clock(no_spacing, plays):
+    seen = []
+
+    def probe(ctx, row):
+        seen.append(ctx.now())
+        return Flow.NEXT
+    plays("var_set", probe)
+    clock = FakeClock(start=12.0)
+    Rig([var("a", "1"), wait(250), var("b", "1")], no_spacing, clock=clock).play()
+    assert seen == [pytest.approx(12.0), pytest.approx(12.25)]
+
+
+def test_breakpoint_on_first_row_of_a_new_group_pauses_in_that_window(no_spacing):
+    clock = FakeClock()
+    host = PausingHost(clock)
+    windows = FakeWindows([window(0x100, "xed", left=100, top=80, width=900, height=600),
+                           window(0x200, "term", left=400, top=300, width=900, height=600)])
+    rows = [win("xed", restore_rect="no"), click(1, 1), goto("t"), win("term", restore_rect="no"),
+            click(2, 2, label="t", breakpoint=True)]
+    rig = Rig(rows, no_spacing, host=host, clock=clock, windows=windows)
+    host.player = rig.player
+    rig.play()
+    assert rig.error is None
+    assert rig.windows.calls == [("activate", 0x100), ("activate", 0x200), ("activate", 0x200)]
+    assert host.paused[0][1]["win_x"] == 400
+
+
+def test_error_while_resuming_names_the_row(no_spacing):
+    clock = FakeClock()
+    host = PausingHost(clock)
+    rows = [win("xed", restore_rect="no"), click(1, 1, breakpoint=True)]
+    rig = Rig(rows, no_spacing, host=host, clock=clock, windows=moved_xed())
+    host.player = rig.player
+
+    def fail(window, settle_ms=1000):
+        raise OSError("connection closed")
+    original = host.on_paused
+
+    def paused(row_id, variables):
+        rig.windows.activate = fail
+        original(row_id, variables)
+    host.on_paused = paused
+    rig.play()
+    assert rig.error == "Row 2: OSError: connection closed"
+
+
+def test_negative_repeat_is_refused(settings):
+    settings.playback.repeat = -1
+    with pytest.raises(ValueError, match="Repeat"):
+        Rig([click(1, 1)], settings)
+
+
+def test_unscheduled_row_resets_the_schedule(no_spacing, plays):
+    def slow_ocr(ctx, row):
+        rig.clock.advance(0.04)
+        return Flow.NEXT
+    plays("ocr_read", slow_ocr)
+    rows = [make_row(make("ocr_read")), wait(100)]
+    rig = Rig(rows, no_spacing)
+    rig.play()
+    assert rig.error is None
+    # The 40 ms OCR does not shorten the following wait.
+    assert rig.clock.t == pytest.approx(0.140)
+
+
+def test_unwaited_exec_program_is_killed_when_playback_ends(no_spacing, tmp_path, plays):
+    pidfile = tmp_path / "pid"
+
+    def start(ctx, row):
+        ctx.run_command("sleep 30 & echo $! > '%s'; wait" % pidfile, False)
+        deadline = time.monotonic() + 3
+        while not pidfile.exists() or not pidfile.read_text().strip():
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
+        return Flow.NEXT
+    plays("exec_program", start)
+    rig = Rig([make_row(make("exec_program", command="x"))], no_spacing).play()
+    assert rig.error is None
+    pid = int(pidfile.read_text())
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        try:
+            with open("/proc/%d/stat" % pid) as f:
+                if f.read().split()[2] == "Z":
+                    break
+        except FileNotFoundError:
+            break
+        time.sleep(0.02)
+    else:
+        pytest.fail("the exec_program child is still running")

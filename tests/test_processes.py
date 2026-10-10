@@ -8,7 +8,7 @@ import time
 
 import pytest
 
-from macro_recorder.engine.processes import ProcessError, child_env, run
+from macro_recorder.engine.processes import ProcessError, child_env, run, terminate
 
 
 def _wait_gone(pid: int, timeout: float = 3.0) -> bool:
@@ -111,3 +111,37 @@ def test_new_session(tmp_path):
     out = tmp_path / "sid"
     assert run("ps -o sid= -p $$ > '%s'" % out, None, True, 0, threading.Event()) == 0
     assert int(out.read_text()) != os.getsid(0)
+
+
+def test_stop_kills_a_grandchild_that_ignores_sigterm(tmp_path):
+    stop = threading.Event()
+    pidfile = tmp_path / "pid"
+    threading.Timer(0.3, stop.set).start()
+    started = time.monotonic()
+    result = run("(trap '' TERM; exec sleep 30) & echo $! > '%s'; wait" % pidfile, None, True, 0, stop)
+    assert result is None
+    assert _wait_gone(int(pidfile.read_text()), timeout=5)
+    assert time.monotonic() - started < 6
+
+
+def test_terminate_ends_unwaited_children(tmp_path):
+    children = []
+    pidfile = tmp_path / "pid"
+    assert run("sleep 30 & echo $! > '%s'; wait" % pidfile, None, False, 0, threading.Event(),
+               children) is None
+    assert len(children) == 1
+    deadline = time.monotonic() + 3
+    while not (pidfile.exists() and pidfile.read_text().strip()):
+        assert time.monotonic() < deadline
+        time.sleep(0.02)
+    started = time.monotonic()
+    terminate(children)
+    assert _wait_gone(int(pidfile.read_text()))
+    assert time.monotonic() - started < 1
+
+
+def test_terminate_ignores_finished_children():
+    children = []
+    run("true", None, False, 0, threading.Event(), children)
+    children[0].wait(3)
+    terminate(children)
