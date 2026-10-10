@@ -1,5 +1,7 @@
 """MacroDocument: rows, undo, labels, sessions, split."""
 
+from dataclasses import replace
+
 import pytest
 
 from macro_recorder.model import catalogue
@@ -125,6 +127,23 @@ def test_rename_label_rewrites_targets_and_rejects_duplicates():
         doc.rename_label(b, "start")
     assert label_problem("1abc") is not None
     assert label_problem("ok-label_2") is None
+
+
+def test_clearing_a_label_that_rows_jump_to_is_refused():
+    doc = MacroDocument()
+    a, b, c, d = doc.append([wait(1, label="top"), goto("top"), wait(2, label="free"), goto("TOP")])
+    revision = doc.revision
+    with pytest.raises(ValueError, match=r"Rows 2, 4 jump to 'top'"):
+        doc.rename_label(a, "")
+    assert doc.rename_problem(a, "") is not None
+    with pytest.raises(ValueError, match="Rows 2, 4"):
+        doc.replace_row(replace(doc.row(a), label=""))
+    assert doc.row(a).label == "top" and doc.row(b).event["target"] == "top"
+    assert doc.revision == revision
+    doc.rename_label(c, "")
+    assert doc.row(c).label == ""
+    doc.rename_label(a, "again")
+    assert doc.row(b).event["target"] == "again" and doc.row(d).event["target"] == "again"
 
 
 def test_paste_clears_duplicate_labels():

@@ -153,6 +153,21 @@ def test_breakpoint_pauses_then_continue_finishes():
     assert rig.shell.errors == []
 
 
+def test_breakpoint_set_while_paused_reaches_the_running_player():
+    rows = [wait_row(breakpoint=True), wait_row(), wait_row()]
+    rig = Rig(rows)
+    rig.controller.start()
+    rig.pump_until(lambda: rig.controller.paused)
+    rig.controller.set_breakpoint(rows[2].id, True)
+    rig.controller.continue_()
+    rig.pump_until(lambda: rig.controller.paused)
+    assert rig.shell.highlights[-1] == rows[2].id
+    rig.controller.continue_()
+    rig.run_to_end()
+    assert rig.shell.logs.count("Paused at row 3") == 1
+    rig.controller.set_breakpoint(rows[0].id, False)        # no run: nothing to do
+
+
 def test_stop_while_paused():
     rows = [wait_row(breakpoint=True), wait_row()]
     rig = Rig(rows)

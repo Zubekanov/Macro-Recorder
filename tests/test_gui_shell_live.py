@@ -16,6 +16,7 @@ from macro_recorder.gui.main_window import MainWindow
 from macro_recorder.gui.playback import Platform, PlatformFactories
 from macro_recorder.gui.settings import Settings
 from macro_recorder.gui.table import LOCKED_TAG, preset_command
+from macro_recorder.gui.targeting import Capture
 from macro_recorder.model import fileformat
 from macro_recorder.model.catalogue import make
 from macro_recorder.model.document import MacroDocument, make_row
@@ -354,7 +355,6 @@ def test_targeting_round_trip(shell):
             self.on_done = on_done
 
         def start(self):
-            from macro_recorder.gui.targeting import Capture
             self.on_done(Capture(10, 20, "#ff0000"), None)
 
         def cancel(self):
@@ -364,7 +364,7 @@ def test_targeting_round_trip(shell):
     w.request_targeting(("x", "y"), delivered.append)
     assert w.mode is Mode.TARGETING
     shell.run_until(lambda: delivered)
-    assert delivered == [{"x": 10, "y": 20, "colour": "#ff0000"}]
+    assert delivered == [Capture(10, 20, "#ff0000")]
     assert w.mode is Mode.IDLE
 
 
@@ -382,6 +382,14 @@ def show(shell) -> None:
 def row_centre(tree, iid: str) -> tuple[int, int]:
     x, y, width, height = tree.bbox(iid)
     return x + width // 2, y + height // 2
+
+
+def double_click(widget, x: int, y: int, start: int = 1000) -> None:
+    """Two clicks 50 ms apart, which Tk turns into ``<Double-Button-1>``
+    (Tk 9 refuses to generate that event directly)."""
+    for t in (start, start + 50):
+        widget.event_generate("<ButtonPress-1>", x=x, y=y, time=t)
+        widget.event_generate("<ButtonRelease-1>", x=x, y=y, time=t + 10)
 
 
 def test_escape_in_the_message_box_stops_playback(shell):
@@ -479,7 +487,8 @@ def test_locked_table_ignores_keys_and_clicks(shell):
     ids = shell.ids()
     w.table.select([ids[0]])
     w.root.update()
-    w.set_mode(Mode.RECORDING)
+    assert w.commands.run("record.start")
+    assert w.mode is Mode.RECORDING
     tree.focus_force()
     w.root.update()
     before = w.document.rows
@@ -523,11 +532,11 @@ def test_double_click_on_the_number_column_toggles_the_breakpoint(shell):
     w.root.update()
     target = shell.ids()[1]
     x, y, _width, height = tree.bbox(str(target), "number")
-    tree.event_generate("<Double-Button-1>", x=x + 5, y=y + height // 2)
+    double_click(tree, x + 5, y + height // 2)
     w.root.update()
     assert w.document.row(target).breakpoint
     assert tree.set(str(target), "number").startswith("*")
-    tree.event_generate("<Double-Button-1>", x=x + 5, y=y + height // 2)
+    double_click(tree, x + 5, y + height // 2, start=10_000)
     w.root.update()
     assert not w.document.row(target).breakpoint
 

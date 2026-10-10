@@ -246,9 +246,16 @@ class MacroDocument:
         self._commit(new, Change("moved", tuple(r.id for r in moving)))
 
     def replace_row(self, row: Row) -> None:
-        """Replace the row with the same id.  Label changes rewrite targets."""
+        """Replace the row with the same id.  Label changes rewrite targets.
+
+        Raises ValueError when the change clears a label other rows jump to.
+        """
         old = self.row(row.id)
         rows = self._rows
+        if old.label and not row.label:
+            problem = self._referenced_problem(old.label)
+            if problem:
+                raise ValueError(problem)
         if old.label != row.label and old.label:
             rows = tuple(_retarget(r, old.label, row.label) for r in rows)
         rows = tuple(row if r.id == row.id else r for r in rows)
@@ -257,10 +264,35 @@ class MacroDocument:
         self._commit(rows, Change("updated", (row.id,)))
 
     def rename_label(self, row_id: int, label: str) -> None:
-        problem = label_problem(label, self, row_id)
+        """Give a row a new label, rewriting every target that used the old one.
+
+        Raises ValueError for an unacceptable label or for clearing a label
+        that rows jump to.
+        """
+        problem = self.rename_problem(row_id, label)
         if problem:
             raise ValueError(problem)
         self.replace_row(replace(self.row(row_id), label=label))
+
+    def rename_problem(self, row_id: int, label: str) -> str | None:
+        """Why :meth:`rename_label` would refuse ``label`` for the row, or None."""
+        problem = label_problem(label, self, row_id)
+        if problem:
+            return problem
+        old = self.row(row_id).label
+        if old and not label:
+            return self._referenced_problem(old)
+        return None
+
+    def _referenced_problem(self, label: str) -> str | None:
+        """The refusal for clearing ``label`` while rows jump to it, or None."""
+        index = self.row_index()
+        numbers = [index[r.id] + 1 for r in rows_referencing(self._rows, label)]
+        if not numbers:
+            return None
+        return "%s %s jump%s to %r; change %s target first" % (
+            "Row" if len(numbers) == 1 else "Rows", ", ".join(map(str, numbers)),
+            "s" if len(numbers) == 1 else "", label, "its" if len(numbers) == 1 else "their")
 
     def set_enabled(self, ids: Iterable[int], enabled: bool) -> None:
         wanted = set(ids)

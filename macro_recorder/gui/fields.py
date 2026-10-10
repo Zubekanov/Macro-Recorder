@@ -368,7 +368,7 @@ def field_label(spec: FieldSpec) -> str:
 # Widgets
 # ===========================================================================
 
-LABEL_WIDTH = 18
+LABEL_WIDTH = 24
 INVALID_COLOUR = "#c00000"
 AMBER_COLOUR = "#b06000"
 _STATE_PREFIX = {"invalid": "Invalid", "amber": "Amber"}

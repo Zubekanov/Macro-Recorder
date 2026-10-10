@@ -1,4 +1,5 @@
-"""Dialogs: unsaved-changes prompt, error and information boxes, message_box.
+"""Dialogs: unsaved-changes prompt, error and information boxes, message_box,
+key capture.
 
 Modal dialogs count themselves in :func:`modal_active`, which the hotkey
 router reads from its own thread to ignore global hotkeys meanwhile.  File
@@ -14,6 +15,7 @@ from contextlib import contextmanager
 from tkinter import filedialog, ttk
 from typing import Callable, Iterator, Sequence
 
+from macro_recorder.gui.keycapture import key_from_event
 from macro_recorder.gui.playback import ask_buttons
 
 _modal_lock = threading.Lock()
@@ -76,7 +78,7 @@ class _ButtonDialog(tk.Toplevel):
         self.bind("<Escape>", lambda e: self.choose(last))
         self.protocol("WM_DELETE_WINDOW", lambda: self.choose(last))
         self.buttons[first].focus_set()
-        _place_over(self, master)
+        place_over(self, master)
 
     def choose(self, answer: str) -> None:
         if self._closed:
@@ -94,7 +96,7 @@ class _ButtonDialog(tk.Toplevel):
             self.destroy()
 
 
-def _place_over(dialog: tk.Toplevel, master: tk.Misc) -> None:
+def place_over(dialog: tk.Toplevel, master: tk.Misc) -> None:
     """Centre the dialog over the master's toplevel when that is visible."""
     dialog.update_idletasks()
     top = master.winfo_toplevel()
@@ -105,14 +107,24 @@ def _place_over(dialog: tk.Toplevel, master: tk.Misc) -> None:
     dialog.geometry("+%d+%d" % (max(0, x), max(0, y)))
 
 
-def _run_modal(dialog: _ButtonDialog) -> str:
+def run_modal(dialog: tk.Toplevel, focus: tk.Misc | None = None) -> None:
+    """Show ``dialog`` over its master with a local grab until it is destroyed.
+
+    ``focus``, when given, takes the keyboard focus once the dialog is shown.
+    """
     master = dialog.master
     if isinstance(master, tk.Misc) and master.winfo_toplevel().winfo_viewable():
         dialog.transient(master.winfo_toplevel())
     with modal():
         dialog.wait_visibility()
         dialog.grab_set()
+        if focus is not None:
+            focus.focus_force()
         dialog.wait_window()
+
+
+def _run_modal(dialog: _ButtonDialog) -> str:
+    run_modal(dialog)
     return dialog.answer
 
 
@@ -149,6 +161,44 @@ class MessageBoxDialog(_ButtonDialog):
         self.close()
         self._on_stop()
         return "break"
+
+
+class KeyCaptureDialog(tk.Toplevel):
+    """Reads the next key press: one key (``single``) or a combination.
+
+    ``result`` is the stored form (``ctrl+shift+s``), or None when cancelled.
+    Every key counts, Escape and Return included, so only Cancel or the
+    window's close button cancel.
+    """
+
+    def __init__(self, master: tk.Misc, single: bool) -> None:
+        super().__init__(master)
+        self.title("Capture key" if single else "Capture keys")
+        self.result: str | None = None
+        self._single = single
+        self.resizable(False, False)
+        body = ttk.Frame(self, padding=12)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text="Press the key" if single else "Press the key combination").pack(
+            anchor="w", pady=(0, 12))
+        ttk.Button(body, text="Cancel", command=self.destroy, takefocus=False).pack(anchor="e")
+        self.bind("<KeyPress>", self._on_key)
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        place_over(self, master)
+
+    def _on_key(self, event: tk.Event) -> str:
+        key = key_from_event(event.keysym, int(event.state), self._single)
+        if key is not None:
+            self.result = key
+            self.destroy()
+        return "break"
+
+
+def capture_key(master: tk.Misc, single: bool) -> str | None:
+    """Read one key or combination in a modal dialog; None when cancelled."""
+    dialog = KeyCaptureDialog(master, single)
+    run_modal(dialog, focus=dialog)
+    return dialog.result
 
 
 def ask_open_path(master: tk.Misc, folder: str) -> str:

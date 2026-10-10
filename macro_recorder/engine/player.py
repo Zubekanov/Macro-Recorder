@@ -174,6 +174,8 @@ class Player:
             raise ValueError("Repeat must be 0 or more, got %r" % settings.playback.repeat)
         self._stop = threading.Event()
         self._resume = threading.Event()
+        self._breakpoint_lock = threading.Lock()
+        self._breakpoints: dict[int, bool] = {}     # row id -> set during this run
         self._clock: Clock = clock if clock is not None else _SystemClock(self._stop)
         self._host = host
         self._watcher = stop_key_watcher
@@ -273,6 +275,15 @@ class Player:
         """Continue after a breakpoint."""
         self._resume.set()
 
+    def set_breakpoint(self, row_id: int, on: bool) -> None:
+        """Set or clear a row's breakpoint for the rest of this run.  Any thread."""
+        with self._breakpoint_lock:
+            self._breakpoints[row_id] = on
+
+    def _has_breakpoint(self, row: Row) -> bool:
+        with self._breakpoint_lock:
+            return self._breakpoints.get(row.id, row.breakpoint)
+
     # ------------------------------------------------------------- the loop
 
     def _run(self) -> None:
@@ -323,7 +334,7 @@ class Player:
             outcome = self._ensure_context(index, row)
             if outcome is not Flow.NEXT:
                 return outcome
-            if row.breakpoint and self._pause(row):
+            if self._has_breakpoint(row) and self._pause(row):
                 return Flow.STOP
             delay_ms = max(row.delay_ms, self.settings.playback.min_spacing_ms)
             if self._scheduled_wait(delay_ms / 1000.0 / self.speed):

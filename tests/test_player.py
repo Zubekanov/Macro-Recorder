@@ -662,6 +662,25 @@ def test_stop_while_paused(no_spacing):
     assert rig.error is None and rig.clicks() == []
 
 
+def test_breakpoint_set_while_paused_applies_to_the_current_run(no_spacing):
+    host = FakeHost()
+    rows = [click(1, 1, breakpoint=True), click(2, 2), click(3, 3, breakpoint=True)]
+    rig = Rig(rows, no_spacing, host=host)
+    paused_at = []
+
+    def on_paused(row_id, variables):
+        paused_at.append(row_id)
+        if row_id == rows[0].id:
+            rig.player.set_breakpoint(rows[1].id, True)
+            rig.player.set_breakpoint(rows[2].id, False)
+        rig.player.resume()
+    host.on_paused = on_paused
+    rig.play()
+    assert rig.error is None
+    assert paused_at == [rows[0].id, rows[1].id]
+    assert len(rig.clicks()) == 3
+
+
 def test_ask_round_trip(no_spacing):
     host = FakeHost(answers=["no"])
     rows = [win("xed", restore_rect="no"), make_row(make("key_press", key="Control_L")),

@@ -132,6 +132,7 @@ class DetailsPanel(ttk.Frame):
         self._body.grid(row=3, column=0, sticky="ew")
         self._message = ttk.Label(self, anchor="w", justify="left", wraplength=260)
         self._message.grid(row=4, column=0, sticky="ew", pady=(6, 0))
+        self.bind("<Configure>", self._on_resize, add="+")
 
         document.subscribe(self._on_document_change)
         self.bind("<Destroy>", self._on_destroy, add="+")
@@ -344,6 +345,10 @@ class DetailsPanel(ttk.Frame):
         if change.kind == "reset":
             self.revert_pending()
         self.refresh()
+
+    def _on_resize(self, event: tk.Event) -> None:
+        """Wrap the field message to the panel's width."""
+        self._message.configure(wraplength=max(120, event.width - 16))
 
     def _on_focus_out(self, _event: tk.Event) -> None:
         self.after_idle(self._end_edit_if_focus_left)

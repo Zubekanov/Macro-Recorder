@@ -81,7 +81,7 @@ def test_a_panel_builds_for_every_action_type(root):
         h.show(row)
         layout = spec_for(row).layout_for(row)
         assert [s for s, _w in h.panel._fields] == list(layout)
-        assert len(h.panel._row_fields) == 4
+        assert len(h.panel._row_fields) == 2
         assert h.shapes[-1] == spec_for(row).overlay(row)
         assert all(w.state != "invalid" or w.spec.kind.name == "LABEL_TARGET"
                    for _s, w in h.panel._fields)
@@ -398,7 +398,8 @@ def test_overlay_is_shaped_to_its_marks_and_click_through(root):
     root.update()
     assert overlay._xid is not None, "the SHAPE extension is expected under Xvfb"
     xid = overlay._xid
-    assert xid == int(overlay._window.wm_frame(), 16)     # the wrapper Tk maps, not its child
+    inner = x11.window(overlay._display, overlay._window.winfo_id())
+    assert xid == inner.query_tree().parent.id      # the wrapper Tk maps, not its child
     bounding = x11.get_window_shape(overlay._display, xid, x11.SHAPE_BOUNDING)
     assert covers(bounding, 200, 150)
     assert not covers(bounding, 600, 600)

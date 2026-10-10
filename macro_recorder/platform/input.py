@@ -234,7 +234,17 @@ class XTestInput:
         elif not press and button in self._held_buttons:
             self._held_buttons.remove(button)
         x11.fake_button(self._d, button, press)
-        self._d.flush()
+        self._sync()
+
+    def _sync(self) -> None:
+        """Wait until the server has processed the requests sent so far.
+
+        XTest requests have no reply, and the server hands buffered XRecord
+        data to recording clients only when it writes to some client.  The
+        round trip makes it do so, so a listener sees button and scroll
+        events at once even when no window selects them.
+        """
+        self._d.sync()
 
     # -- InputBackend -------------------------------------------------------
 
@@ -261,7 +271,7 @@ class XTestInput:
         with self._lock:
             x11.fake_button(self._d, button, True)
             x11.fake_button(self._d, button, False)
-            self._d.flush()
+            self._sync()
 
     def press_key(self, name: str) -> None:
         keycode = self.keycode_for(name)

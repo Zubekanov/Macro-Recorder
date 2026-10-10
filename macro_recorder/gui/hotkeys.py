@@ -83,14 +83,14 @@ class HotkeyRouter:
         self._grabber.ungrab_all()
         self._failures = {}
         hotkeys = self._settings.hotkeys
-        same = _same_combo(hotkeys.record, hotkeys.play)
+        same = same_combo(hotkeys.record, hotkeys.play)
         for name, combo, callback in (("record", hotkeys.record, self._on_record),
                                       ("play", hotkeys.play, self._on_play)):
             problem = combo_problem(combo)
             if problem is None and same and name == "play":
                 problem = "Record and Play use the same keys"
             if problem is None and not self._grabber.grab(combo, callback):
-                problem = "%s is in use by another application" % _display(combo)
+                problem = "%s is in use by another application" % display_combo(combo)
             if problem is not None:
                 self._failures[name] = problem
                 log.warning("%s hotkey not available: %s", name.capitalize(), problem)
@@ -106,7 +106,7 @@ class HotkeyRouter:
         hotkeys = self._settings.hotkeys
         for name, combo in (("record", hotkeys.record), ("play", hotkeys.play)):
             if combo in refused and name not in self._failures:
-                self._failures[name] = "%s is in use by another application" % _display(combo)
+                self._failures[name] = "%s is in use by another application" % display_combo(combo)
                 log.warning("%s hotkey not available: %s", name.capitalize(),
                             self._failures[name])
         return self.failures
@@ -165,7 +165,7 @@ class HotkeyRouter:
             self._actions.stop_play()
 
 
-def _same_combo(first: str, second: str) -> bool:
+def same_combo(first: str, second: str) -> bool:
     """True when two combos press the same key with the same modifiers, in any order."""
     def key(combo: str) -> tuple[frozenset[str], str]:
         names = parse_combo(combo)
@@ -176,7 +176,8 @@ def _same_combo(first: str, second: str) -> bool:
         return False
 
 
-def _display(combo: str) -> str:
+def display_combo(combo: str) -> str:
+    """``ctrl+shift+F9`` -> ``Ctrl+Shift+F9``; text that does not parse is shown as is."""
     try:
         return format_combo(parse_combo(combo))
     except ValueError:

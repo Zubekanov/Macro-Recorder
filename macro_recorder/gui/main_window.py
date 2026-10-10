@@ -29,13 +29,15 @@ from macro_recorder.engine.recorder import Recorder
 from macro_recorder.gui import dialogs
 from macro_recorder.gui import settings as settings_module
 from macro_recorder.gui.commands import IDLE_ONLY, Command, CommandRegistry
+from macro_recorder.gui.details import DetailsPanel
 from macro_recorder.gui.hotkeys import HotkeyActions, HotkeyRouter
 from macro_recorder.gui.log_panel import LogPanel
+from macro_recorder.gui.overlay import Overlay
 from macro_recorder.gui.playback import (
     AskRequest, Platform, PlaybackCallbacks, PlaybackController,
 )
 from macro_recorder.gui.recording import RecordingCallbacks, RecordingController
-from macro_recorder.gui.settings import Settings
+from macro_recorder.gui.settings import ON_MISSING_CHOICES, Settings
 from macro_recorder.gui.table import ActionTable, preset_command, shifted_index
 from macro_recorder.gui.targeting import Capture, TargetingSession
 from macro_recorder.model import catalogue, fileformat, validate
@@ -45,35 +47,19 @@ from macro_recorder.model.keys import format_combo, parse_combo
 from macro_recorder.model.protocols import Change, Mode, OverlayShape
 from macro_recorder.platform.session import OwnWindows, SessionProblem
 
-# Interim: the details and overlay modules are optional until they are merged,
-# after which these become plain imports.  Only their absence is tolerated.
-try:
-    from macro_recorder.gui.details import DetailsPanel
-except ModuleNotFoundError as _missing:
-    if _missing.name != "macro_recorder.gui.details":
-        raise
-    DetailsPanel = None
-try:
-    from macro_recorder.gui.overlay import Overlay
-except ModuleNotFoundError as _missing:
-    if _missing.name != "macro_recorder.gui.overlay":
-        raise
-    Overlay = None
-
 log = logging.getLogger(__name__)
 
 APP_NAME = "Macro Recorder"
 IDLE_PUMP_MS = 200
 BUSY_PUMP_MS = 50
+DETAILS_WIDTH = 400
 CLIPBOARD_KEY = "macro_recorder_rows"
-LOCKED_MODES = (Mode.RECORDING, Mode.PLAYING, Mode.PAUSED)
 VIEW_MODES = frozenset(Mode) - {Mode.PAUSED}
 _WHOLE_NUMBER = re.compile(r"[0-9]+")
 FILTER_LABELS = {
     "mouse_move": "Skip mouse moves", "mouse_click": "Skip mouse clicks",
     "mouse_scroll": "Skip mouse scrolls", "keyboard": "Skip keyboard", "wait": "Skip waits",
 }
-ON_MISSING_CHOICES = ("skip", "halt")
 _ROW_ERROR = re.compile(r"^Row (\d+):")
 
 
@@ -307,26 +293,6 @@ class X11ToplevelIds:
 
 
 # ---------------------------------------------------------------------------
-# Stand-ins while the editors package is missing
-# ---------------------------------------------------------------------------
-
-class _DetailsStub(ttk.Frame):
-    """Takes the Details panel's place when ``gui.details`` lacks the class."""
-
-    def __init__(self, master: tk.Misc) -> None:
-        super().__init__(master, width=280)
-
-    def show(self, row_id: int | None) -> None:
-        pass
-
-    def set_locked(self, locked: bool) -> None:
-        pass
-
-    def revert_pending(self) -> None:
-        pass
-
-
-# ---------------------------------------------------------------------------
 # The window
 # ---------------------------------------------------------------------------
 
@@ -352,10 +318,9 @@ class MainWindow:
         self._resolver = resolve_xid
         self._router: HotkeyRouter | None = None
         self._hotkeys_grabbed = False
-        self._overlay: Any = None
+        self._overlay: Overlay | None = None
         self._shape: OverlayShape | None = None
         self._paused_row: int | None = None
-        self._focused = True
         self._asks: list[dialogs.MessageBoxDialog] = []
         self._targeting: TargetingSession | None = None
         self._last_inserted: tuple[int, ...] = ()
@@ -369,6 +334,8 @@ class MainWindow:
         self._idle_widgets: list[ttk.Widget] = []
         self._playback_problems: dict[str, str] = {}
         self.targeting_factory: Callable[..., TargetingSession] = TargetingSession
+        self.capture_key: Callable[[bool], str | None] = (
+            lambda single: dialogs.capture_key(self.root, single))
         self.ask_unsaved: Callable[[str], str] = lambda name: dialogs.ask_unsaved(self.root, name)
         self.show_message: Callable[[str, str], None] = (
             lambda title, text: dialogs.show_message(self.root, title, text))
@@ -558,8 +525,7 @@ class MainWindow:
         reg(Command("file.open_recent", "Open recent", self.open_path, idle))
         reg(Command("file.save", "Save", self.save, idle, "Ctrl+S"))
         reg(Command("file.save_as", "Save As...", self.save_as, idle, "Ctrl+Shift+S"))
-        reg(Command("file.settings", "Settings...", self.open_settings, idle,
-                    when=lambda: hasattr(settings_module, "open_settings_dialog")))
+        reg(Command("file.settings", "Settings...", self.open_settings, idle))
         reg(Command("file.exit", "Exit", self.exit, idle))
         reg(Command("edit.undo", "Undo", self.undo, idle, "Ctrl+Z",
                     when=lambda: self.document.can_undo))
@@ -599,6 +565,7 @@ class MainWindow:
                     frozenset({Mode.PLAYING, Mode.PAUSED})))
         reg(Command("view.log", "Output log", self.toggle_log, VIEW_MODES))
         reg(Command("view.overlay", "Overlay", self.toggle_overlay, VIEW_MODES))
+        reg(Command("help.shortcuts", "Keyboard shortcuts", self.show_shortcuts, idle))
         reg(Command("help.about", "About", self.show_about, idle))
 
     def _register(self, command: Command) -> None:
@@ -631,29 +598,21 @@ class MainWindow:
 
         self.main_pane = ttk.PanedWindow(root, orient="vertical")
         self.main_pane.pack(side="top", fill="both", expand=True, padx=4, pady=4)
-        upper = ttk.PanedWindow(self.main_pane, orient="horizontal")
+        self.upper_pane = upper = ttk.PanedWindow(self.main_pane, orient="horizontal")
         self.table = ActionTable(upper, self.document, self.commands, self._on_select)
-        if DetailsPanel is not None:
-            self.details = DetailsPanel(upper, self.document, self.settings,
-                                        self.request_targeting, self._on_shape,
-                                        lambda: self.mode)
-        else:
-            self.details = _DetailsStub(upper)
+        self.details = DetailsPanel(upper, self.document, self.settings, self.request_targeting,
+                                    self._on_shape, lambda: self.mode, self.request_key_capture)
         upper.add(self.table, weight=3)
         upper.add(self.details, weight=1)
         self.main_pane.add(upper, weight=1)
+        self._sash_binding: str | None = upper.bind("<Configure>", self._place_details_sash,
+                                                    add="+")
         self.log_panel = LogPanel(self.main_pane)
         if self.settings.ui.log_visible:
             self.main_pane.add(self.log_panel, weight=0)
             root.after_idle(self._restore_log_height)
-
-        if self.platform is not None and Overlay is not None:
-            try:
-                self._overlay = Overlay(root, self._own_windows, self.settings.ui.overlay_enabled)
-            except Exception as e:
-                log.warning("The overlay is unavailable: %s", e)
-        root.bind("<FocusIn>", lambda e: root.after_idle(self._check_focus), add="+")
-        root.bind("<FocusOut>", lambda e: root.after_idle(self._check_focus), add="+")
+        if self.platform is not None:
+            self._overlay = Overlay(root, self._own_windows, self.settings.ui.overlay_enabled)
 
     def _build_menus(self, parent: ttk.Frame) -> None:
         file_button = ttk.Menubutton(parent, text="File")
@@ -755,20 +714,28 @@ class MainWindow:
         self.play_button = self._button(tab, "play.play", textvariable=self._play_text)
         self.play_button.pack(side="left")
         self.play_stop_button = self._button(tab, "play.stop")
-        self.play_stop_button.pack(side="left", padx=(2, 8))
+        self.play_stop_button.pack(side="left", padx=(2, 0))
+        ttk.Separator(tab, orient="vertical").pack(side="left", fill="y", padx=(6, 0))
+        # Two rows, so the tab fits a window about 900 px wide.
+        options = ttk.Frame(tab)
+        options.pack(side="left", fill="y")
+        first = ttk.Frame(options)
+        first.pack(side="top", anchor="w")
+        second = ttk.Frame(options)
+        second.pack(side="top", anchor="w", pady=(4, 0))
 
         self.speed_var = tk.StringVar(self.root, value=_number_text(playback.speed))
-        self.speed_box = self._labelled_spinbox(tab, "Speed", self.speed_var, 0.25, 100, 0.25, 5)
+        self.speed_box = self._labelled_spinbox(first, "Speed", self.speed_var, 0.25, 100, 0.25, 5)
         self.speed_var.trace_add("write", lambda *a: self._apply_playback_field(
             "speed", self.speed_var, self.speed_box, parse_speed,
             "Speed must be a number above 0, up to 100"))
         self.repeat_var = tk.StringVar(self.root, value=str(playback.repeat))
-        self.repeat_box = self._labelled_spinbox(tab, "Repeat", self.repeat_var, 0, 100000, 1, 6)
+        self.repeat_box = self._labelled_spinbox(first, "Repeat", self.repeat_var, 0, 100000, 1, 6)
         self.repeat_var.trace_add("write", lambda *a: self._apply_playback_field(
             "repeat", self.repeat_var, self.repeat_box, parse_repeat,
             "Repeat must be a whole number; 0 repeats until stopped"))
 
-        self.filter_button = ttk.Menubutton(tab, text="Filter")
+        self.filter_button = ttk.Menubutton(first, text="Filter")
         self.filter_menu = tk.Menu(self.filter_button, tearoff=False)
         self.filter_vars: dict[str, tk.BooleanVar] = {}
         for group in FILTER_GROUPS:
@@ -777,30 +744,30 @@ class MainWindow:
             self.filter_menu.add_checkbutton(label=FILTER_LABELS[group], variable=var,
                                              command=self._apply_filter)
         self.filter_button.configure(menu=self.filter_menu)
-        self.filter_button.pack(side="left", padx=(8, 0))
+        self.filter_button.pack(side="left", padx=(12, 0))
         self._idle_widgets.append(self.filter_button)
 
-        ttk.Label(tab, text="Mouse path").pack(side="left", padx=(8, 2))
+        ttk.Label(first, text="Mouse path").pack(side="left", padx=(12, 2))
         self.path_mode_var = tk.StringVar(self.root, value=self.document.path_mode)
-        self.path_mode_box = ttk.Combobox(tab, textvariable=self.path_mode_var, values=PATH_MODES,
+        self.path_mode_box = ttk.Combobox(first, textvariable=self.path_mode_var, values=PATH_MODES,
                                           state="readonly", width=9)
         self.path_mode_box.bind("<<ComboboxSelected>>", lambda e: self._apply_path_mode())
         self.path_mode_box.pack(side="left")
         self._idle_widgets.append(self.path_mode_box)
 
         self.timeout_var = tk.StringVar(self.root, value=str(playback.window_timeout_ms))
-        ttk.Label(tab, text="Window timeout (ms)").pack(side="left", padx=(8, 2))
-        self.timeout_entry = ttk.Entry(tab, textvariable=self.timeout_var, width=7)
+        ttk.Label(second, text="Window timeout (ms)").pack(side="left", padx=(12, 2))
+        self.timeout_entry = ttk.Entry(second, textvariable=self.timeout_var, width=7)
         self.timeout_entry.pack(side="left")
         self._idle_widgets.append(self.timeout_entry)
         self.timeout_var.trace_add("write", lambda *a: self._apply_playback_field(
             "window_timeout_ms", self.timeout_var, self.timeout_entry, parse_ms,
             "Window timeout must be a whole number of milliseconds"))
 
-        ttk.Label(tab, text="If window missing").pack(side="left", padx=(8, 2))
+        ttk.Label(second, text="If window missing").pack(side="left", padx=(12, 2))
         on_missing = playback.on_missing if playback.on_missing in ON_MISSING_CHOICES else "skip"
         self.on_missing_var = tk.StringVar(self.root, value=on_missing)
-        self.on_missing_box = ttk.Combobox(tab, textvariable=self.on_missing_var,
+        self.on_missing_box = ttk.Combobox(second, textvariable=self.on_missing_var,
                                            values=ON_MISSING_CHOICES, state="readonly", width=6)
         self.on_missing_box.bind("<<ComboboxSelected>>", lambda e: setattr(
             self.settings.playback, "on_missing", self.on_missing_var.get()))
@@ -809,14 +776,14 @@ class MainWindow:
 
         self.restore_var = tk.BooleanVar(self.root, value=playback.restore_rect)
         self.restore_check = ttk.Checkbutton(
-            tab, text="Restore windows", variable=self.restore_var,
+            second, text="Restore windows", variable=self.restore_var,
             command=lambda: setattr(self.settings.playback, "restore_rect", self.restore_var.get()))
-        self.restore_check.pack(side="left", padx=(8, 0))
+        self.restore_check.pack(side="left", padx=(12, 0))
         self._idle_widgets.append(self.restore_check)
 
     def _labelled_spinbox(self, parent: tk.Misc, label: str, var: tk.StringVar, low: float,
                           high: float, step: float, width: int) -> ttk.Spinbox:
-        ttk.Label(parent, text=label).pack(side="left", padx=(8, 2))
+        ttk.Label(parent, text=label).pack(side="left", padx=(12, 2))
         box = ttk.Spinbox(parent, textvariable=var, from_=low, to=high, increment=step,
                           width=width)
         box.pack(side="left")
@@ -865,7 +832,6 @@ class MainWindow:
         self.timeout_var.set(str(playback.window_timeout_ms))
         self.on_missing_var.set(playback.on_missing)
         self.restore_var.set(playback.restore_rect)
-        self.help_label.configure(text=shortcut_help(self.settings))
 
     def _build_view_tab(self) -> None:
         tab = ttk.Frame(self.ribbon, padding=4)
@@ -887,10 +853,8 @@ class MainWindow:
     def _build_help_tab(self) -> None:
         tab = ttk.Frame(self.ribbon, padding=4)
         self.ribbon.add(tab, text="Help")
-        self.help_label = ttk.Label(tab, text=shortcut_help(self.settings), justify="left",
-                                    wraplength=900)
-        self.help_label.pack(side="left", fill="x", expand=True)
-        self._button(tab, "help.about").pack(side="right", anchor="n")
+        self._button(tab, "help.shortcuts").pack(side="left")
+        self._button(tab, "help.about").pack(side="left", padx=(2, 0))
 
     def _build_footer(self) -> None:
         footer = ttk.Frame(self.root, padding=(6, 2))
@@ -919,6 +883,15 @@ class MainWindow:
 
     def _update_elapsed(self) -> None:
         self.elapsed_label.configure(text=format_elapsed(self._stopwatch.elapsed()))
+
+    def _place_details_sash(self, event: tk.Event) -> None:
+        """On the first real layout, give the Details panel its width; the table
+        takes the rest.  Later the user's sash position stands."""
+        if event.width <= DETAILS_WIDTH * 2 or self._sash_binding is None:
+            return
+        self.upper_pane.unbind("<Configure>", self._sash_binding)
+        self._sash_binding = None
+        self.upper_pane.sashpos(0, event.width - DETAILS_WIDTH)
 
     def _restore_log_height(self) -> None:
         self.root.update_idletasks()
@@ -980,25 +953,23 @@ class MainWindow:
         self.commands.refresh()
 
     def _on_shape(self, shape: OverlayShape | None) -> None:
+        """The Details panel's shape for the selected row.  It is kept for idle
+        and shown only then; recording, playing and targeting keep the overlay
+        hidden."""
         self._shape = shape
-        self._update_overlay()
-
-    def _check_focus(self) -> None:
-        try:
-            focused = self.root.focus_displayof() is not None
-        except (KeyError, tk.TclError):
-            focused = True          # a popped-up menu has the focus
-        if focused != self._focused:
-            self._focused = focused
+        if self.mode is Mode.IDLE:
             self._update_overlay()
 
     def _update_overlay(self) -> None:
+        """Show the selected row's marks when idle, the next row's when paused,
+        nothing otherwise.  The overlay itself hides while the application has
+        no focus."""
         overlay = self._overlay
         if overlay is None:
             return
-        if self.mode is Mode.PAUSED and self._focused:
+        if self.mode is Mode.PAUSED:
             overlay.show(self._row_shape(self._paused_row))
-        elif self.mode is Mode.IDLE and self._focused:
+        elif self.mode is Mode.IDLE:
             overlay.show(self._shape)
         else:
             overlay.hide()
@@ -1100,12 +1071,10 @@ class MainWindow:
         self.settings.ui.last_folder = os.path.dirname(os.path.abspath(path))
 
     def open_settings(self) -> None:
-        dialog = getattr(settings_module, "open_settings_dialog", None)
-        if dialog is None:
-            return
-        if dialog(self.root, self.settings, self._router):
-            if self._router is not None and self._hotkeys_grabbed:
-                self._router.start()
+        """The Settings dialog; the grabbed hotkeys are released while it is open."""
+        router = self._router if self._hotkeys_grabbed else None
+        if settings_module.open_settings_dialog(self.root, self.settings, router,
+                                                save=self._save_settings):
             self._sync_settings_widgets()
 
     def exit(self) -> None:
@@ -1229,9 +1198,11 @@ class MainWindow:
         ids = self._breakpoint_targets()
         if ids:
             rows = [self.document.row(i) for i in ids]
-            self.document.set_breakpoint(ids, not all(r.breakpoint for r in rows))
-            if self.mode is Mode.PAUSED:
-                self.log_panel.append(["Breakpoint change applies from the next run"])
+            on = not all(r.breakpoint for r in rows)
+            self.document.set_breakpoint(ids, on)
+            if self.mode is Mode.PAUSED and self.playback is not None:
+                for row_id in ids:
+                    self.playback.set_breakpoint(row_id, on)
 
     def select_all(self) -> None:
         self.table.select([r.id for r in self.document.rows])
@@ -1290,10 +1261,11 @@ class MainWindow:
             self.playback.stop()
 
     def request_targeting(self, keys: tuple[str, ...],
-                          deliver: Callable[[dict], None]) -> None:
+                          deliver: Callable[[Capture], None]) -> None:
         """Run a targeting session for the Details panel's ``keys``; ``deliver``
-        receives ``{'x', 'y', 'colour'}`` on the main thread."""
-        if self.mode is not Mode.IDLE or self.platform is None:
+        receives the :class:`Capture` on the main thread, back in idle, so it
+        may request the next capture (a region's second corner)."""
+        if self.mode is not Mode.IDLE or self.platform is None or self._targeting is not None:
             self.root.bell()
             return
         session_box: list[TargetingSession] = []
@@ -1312,7 +1284,7 @@ class MainWindow:
             self._report_error("Targeting", str(e))
 
     def _targeting_done(self, session: TargetingSession, capture: Capture | None,
-                        error: str | None, deliver: Callable[[dict], None]) -> None:
+                        error: str | None, deliver: Callable[[Capture], None]) -> None:
         if self._targeting is not session:
             return
         self._targeting = None
@@ -1320,7 +1292,24 @@ class MainWindow:
         if error:
             self._report_error("Targeting", error)
         elif capture is not None:
-            deliver({"x": capture.x, "y": capture.y, "colour": capture.colour})
+            deliver(capture)
+
+    def request_key_capture(self, single: bool, deliver: Callable[[str], None]) -> None:
+        """Read a key (``single``) or a combination for the Details panel; the
+        global hotkeys are released meanwhile so their combos can be captured."""
+        if self.mode is not Mode.IDLE:
+            self.root.bell()
+            return
+        router = self._router if self._hotkeys_grabbed else None
+        if router is not None:
+            router.suspend()
+        try:
+            key = self.capture_key(single)
+        finally:
+            if router is not None:
+                router.resume()
+        if key is not None:
+            deliver(key)
 
     # -- view and help -------------------------------------------------------
 
@@ -1345,10 +1334,13 @@ class MainWindow:
             self._overlay.set_enabled(enabled)
             self._update_overlay()
 
+    def show_shortcuts(self) -> None:
+        self.show_message("Keyboard shortcuts", shortcut_help(self.settings))
+
     def show_about(self) -> None:
+        name = ("%s %s" % (APP_NAME, _version())).strip()
         self.show_message("About %s" % APP_NAME,
-                          "%s %s\nRecords, edits and replays mouse and keyboard macros on X11."
-                          % (APP_NAME, _version()))
+                          "%s\nRecords, edits and replays mouse and keyboard macros on X11." % name)
 
     # -- hotkeys -------------------------------------------------------------
 

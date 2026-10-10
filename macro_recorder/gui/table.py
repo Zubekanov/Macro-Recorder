@@ -18,8 +18,9 @@ from tkinter import ttk
 from typing import Callable, Collection, Sequence
 
 from macro_recorder.gui.commands import CommandRegistry
+from macro_recorder.gui.text import visible_controls
 from macro_recorder.model import catalogue
-from macro_recorder.model.document import MacroDocument, Row, label_problem
+from macro_recorder.model.document import MacroDocument, Row
 from macro_recorder.model.protocols import Change, Mode
 
 log = logging.getLogger(__name__)
@@ -27,7 +28,7 @@ log = logging.getLogger(__name__)
 COLUMNS = ("number", "action", "value", "label", "comment")
 HEADINGS = {"number": "#", "action": "Action", "value": "Value", "label": "Label",
             "comment": "Comment"}
-WIDTHS = {"number": 64, "action": 130, "value": 320, "label": 110, "comment": 170}
+WIDTHS = {"number": 56, "action": 120, "value": 300, "label": 90, "comment": 150}
 
 GROUP_TINTS = ("#e8f0fe", "#e6f4ea", "#fef7e0", "#f3e8fd", "#e4f7fb", "#fce8ec")
 PLAYING_BACKGROUND = "#ffd966"
@@ -44,6 +45,8 @@ PROVISIONAL_MARK = "+"
 SHORTCUT_STATE = 0x4 | 0x8 | 0x40          # Control, Mod1 (Alt), Mod4 (Super)
 DRAG_THRESHOLD_PX = 5
 LOCKED_TAG = "MacroRecorderLockedTable"
+# Modes that hide the selection; it comes back by id on return to idle.
+SAVING_MODES = (Mode.RECORDING, Mode.PLAYING, Mode.PAUSED)
 
 EDIT_MENU = (
     ("edit.undo", "Undo"), ("edit.redo", "Redo"), None,
@@ -108,7 +111,7 @@ def cells(number: str, row: Row, where: str) -> tuple[str, ...]:
     except Exception as e:          # a bad row must not break the table
         log.warning("%s: cannot describe the row: %s", where, e)
         value = "?"
-    return (number, spec.name, value, row.label, _one_line(row.comment))
+    return (number, spec.name, visible_controls(value), row.label, _one_line(row.comment))
 
 
 def row_tags(row: Row, group: int | None, filtered: bool) -> tuple[str, ...]:
@@ -241,8 +244,8 @@ class ActionTable(ttk.Frame):
             self.tree.see(iids[0])
 
     def set_mode(self, mode: Mode) -> None:
-        """Lock the table in every mode but idle; save and restore the selection
-        around playback."""
+        """Lock the table in every mode but idle; save and clear the selection
+        while recording or playing and restore it on return to idle."""
         previous, self._mode = self._mode, mode
         self.cancel_inline_edit()
         self._end_drag()
@@ -252,8 +255,7 @@ class ActionTable(ttk.Frame):
         else:
             self.tree.configure(selectmode="none")
             self.tree.bindtags(self._locked_tags)
-        playback = (Mode.PLAYING, Mode.PAUSED)
-        if mode in playback and previous not in playback:
+        if mode in SAVING_MODES and previous not in SAVING_MODES:
             self._saved_selection = self.selected_ids()
             self.tree.selection_set(())
         elif mode is Mode.IDLE and self._saved_selection is not None:
@@ -277,7 +279,8 @@ class ActionTable(ttk.Frame):
         Rows that are the same objects as last time keep their items.
         """
         if self._provisional_base is None:
-            selected = [i for i in self.tree.selection() if not i.startswith("p")]
+            saved = self._saved_selection or ()
+            selected = [str(i) for i in saved if self.tree.exists(str(i))]
             children = self.tree.get_children()
             self._provisional_base = (max(children.index(i) for i in selected) + 1
                                       if selected else len(children))
@@ -645,7 +648,7 @@ class ActionTable(ttk.Frame):
     def _validate_label(self, editor: _InlineEditor) -> None:
         if self._editor is not editor:
             return
-        problem = label_problem(editor.var.get().strip(), self._document, editor.row_id)
+        problem = self._document.rename_problem(editor.row_id, editor.var.get().strip())
         editor.entry.configure(style="Invalid.TEntry" if problem else "TEntry")
 
     def _cancel_from_entry(self, editor: _InlineEditor) -> str:
@@ -664,12 +667,12 @@ class ActionTable(ttk.Frame):
         row = self._document.row(editor.row_id)
         self._document.end_edit()
         if editor.column == "label":
-            problem = label_problem(text, self._document, editor.row_id)
+            problem = self._document.rename_problem(editor.row_id, text)
             if problem:
+                log.warning("Label not changed: %s", problem)
                 if keep_open_if_invalid:
                     self.bell()
                     return "break"
-                log.warning("Label not changed: %s", problem)
                 self.cancel_inline_edit()
                 return "break"
             self.cancel_inline_edit()

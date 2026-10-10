@@ -22,6 +22,7 @@ from typing import Any, Callable, Mapping
 
 from macro_recorder.engine.player import Player
 from macro_recorder.gui.settings import Settings
+from macro_recorder.gui.text import visible_controls
 from macro_recorder.model.document import MacroDocument
 from macro_recorder.model.protocols import (
     HotkeyGrabber, InputBackend, InputListener, Mode, Screen, StopKeyWatcher, WindowManager,
@@ -175,7 +176,8 @@ class QueueHost:
         self._post("row", row_id)
 
     def on_log(self, line: str) -> None:
-        self._post("log", line)
+        """Post one log line; typed newlines and tabs in it are shown escaped."""
+        self._post("log", visible_controls(line))
 
     def on_paused(self, row_id: int, variables: Mapping[str, Any]) -> None:
         self._post("paused", (row_id, dict(variables)))
@@ -304,6 +306,11 @@ class PlaybackController:
         self._paused = False
         self._callbacks.set_mode(Mode.PLAYING)
         self._player.resume()
+
+    def set_breakpoint(self, row_id: int, on: bool) -> None:
+        """Set or clear a breakpoint in the running player, so it applies to this run."""
+        if self._player is not None:
+            self._player.set_breakpoint(row_id, on)
 
     def stop(self) -> None:
         """Ask the player to stop; ``finished`` follows through the queue."""
