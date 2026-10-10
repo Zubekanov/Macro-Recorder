@@ -18,6 +18,10 @@ dependencies = [
 macro-recorder = "macro_recorder.app:main"
 macro-recorder-cli = "macro_recorder.cli:main"
 
+[tool.uv]
+# A uv-managed CPython bundles tkinter, so the GUI needs no python3-tk package.
+python-preference = "only-managed"
+
 [dependency-groups]
 dev = ["pytest>=8"]
 
