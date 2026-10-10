@@ -3,12 +3,12 @@
  "path_mode": "recorded",
  "rows": [
   {
-   "comment": "Bring up xed (its new-file title is \"Unsaved Document 1\"), starting it if needed",
+   "comment": "Bring up xed, starting it if needed; its new-file title is \"Unsaved Document 1\" (older versions add \" - xed\")",
    "events": [
     {
      "type": "window_focus",
-     "window": "Unsaved Document",
-     "match_mode": "substring",
+     "window": "(^Unsaved Document \\d+| - xed)$",
+     "match_mode": "regex",
      "launch": "xed",
      "rect": [
       200,

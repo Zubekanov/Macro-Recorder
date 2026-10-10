@@ -181,6 +181,7 @@ def test_example_targets_only_xed_windows(capsys):
     assert cli.main(["validate", example]) == 0
     row = fileformat.load(example).rows[0]
     pattern, mode = row.event["window"], row.event["match_mode"]
+    assert title_matches("Unsaved Document 1", pattern, mode)      # xed on Mint 22.3
     assert title_matches("Unsaved Document 1 - xed", pattern, mode)
     assert title_matches("notes.txt (~/Documents) - xed", pattern, mode)
     for other in ("Fixed bugs - Mozilla Firefox", "xed-demo.json - GitHub", "Mixed results"):
