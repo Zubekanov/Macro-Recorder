@@ -97,17 +97,20 @@ def parse_combo(text: str) -> tuple[str, ...]:
     """``"ctrl+shift+s"`` -> ``("Control_L", "Shift_L", "s")``.
 
     Modifiers come first in the given order; the last element is the key.
-    A lone ``+`` is the plus key.  Raises ValueError when empty or when a
-    modifier appears after the key.
+    A lone ``+`` is the plus key, and so is a trailing ``++`` (``ctrl++``).
+    Raises ValueError when empty, when a modifier appears after the key, or
+    when a single trailing ``+`` leaves the key out (``ctrl+``).
     """
     text = text.strip()
     if not text:
         raise ValueError("Empty key combination")
     if text == "+":
         return ("plus",)
-    parts = [p for p in text.split("+")]
-    if parts and parts[-1] == "" and len(parts) >= 2:
-        parts = parts[:-2] + ["+"]          # trailing '+' means the plus key
+    parts = text.split("+")
+    if text.endswith("+"):
+        if not text.endswith("++"):
+            raise ValueError("No key after the last '+' in %r" % text)
+        parts = parts[:-2] + ["+"]          # trailing '++' means the plus key
     names = [normalise_key(p) for p in parts if p != ""]
     if not names:
         raise ValueError("Empty key combination")

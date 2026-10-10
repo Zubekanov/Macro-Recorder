@@ -93,7 +93,7 @@ def test_message_box_mapping(ctx, buttons, answer, targets, expected):
     r = row("message_box", text="Go?", buttons=buttons, var_name="answer", **targets)
     assert play(ctx, r) == expected
     assert ctx.variables["answer"] in misc.BUTTON_SETS[buttons]
-    assert ctx.reactivations == 1
+    assert ctx.reactivations == 0      # the engine's host.ask re-activates
 
 
 def test_message_box_renders_text_and_title(ctx):

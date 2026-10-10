@@ -28,6 +28,10 @@ class ProcessError(RuntimeError):
     """A command could not be started or ran past its timeout."""
 
 
+class ProcessTimeout(ProcessError):
+    """A waited-for command ran past its timeout and was terminated."""
+
+
 def child_env(environ: dict[str, str] | None = None) -> dict[str, str]:
     """The environment for a child: no ``VIRTUAL_ENV``, no venv ``bin`` on ``PATH``."""
     env = dict(os.environ if environ is None else environ)
@@ -54,8 +58,8 @@ def run(command: str, cwd: str | None, wait: bool, timeout_ms: float,
     end its group later with :func:`terminate`.  With ``wait`` the exit code
     is returned; ``timeout_ms`` > 0 limits the wait.  When ``stop_event`` is
     set, or the timeout passes, the process group is terminated.  A stop
-    returns None; a timeout raises ProcessError, as does a command that
-    cannot be started.
+    returns None; a timeout raises ProcessTimeout and a command that cannot
+    be started raises ProcessError.
     """
     if not command.strip():
         raise ProcessError("The command is empty")
@@ -82,7 +86,7 @@ def run(command: str, cwd: str | None, wait: bool, timeout_ms: float,
             return None
         if deadline is not None and time.monotonic() >= deadline:
             terminate([proc])
-            raise ProcessError("%r did not finish within %d ms" % (command, int(timeout_ms)))
+            raise ProcessTimeout("%r did not finish within %d ms" % (command, int(timeout_ms)))
 
 
 def terminate(procs: list[subprocess.Popen]) -> None:

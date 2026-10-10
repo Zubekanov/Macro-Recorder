@@ -174,8 +174,12 @@ def combo_text(names: Iterable[str]) -> str:
 
 
 def split_gap(gap_s: float, settings: RecordingSettings) -> tuple[int | None, int]:
-    """Rule 7: ``(wait row ms or None, delay_ms of the later row)``."""
-    gap_ms = max(0.0, gap_s) * 1000
+    """Rule 7: ``(wait row ms or None, delay_ms of the later row)``.
+
+    The gap is rounded to whole microseconds before the comparison, so a gap
+    of exactly ``min_wait_ms`` between float timestamps (2.7 - 2.6) is a delay.
+    """
+    gap_ms = round(max(0.0, gap_s) * 1000, 3)
     if gap_ms > settings.min_wait_ms:
         return int(round(gap_ms)), 0
     return None, int(round(gap_ms))

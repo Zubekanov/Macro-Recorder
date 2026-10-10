@@ -114,7 +114,9 @@ def _play_box(ctx: PlayContext, row: Row) -> Flow | Jump | Abort:
     """Ask the host and go to the answer's target; None from the host means stopped.
 
     An answer outside the row's button set (the dialog was closed) counts as
-    the set's last button: OK, Cancel or No.
+    the set's last button: OK, Cancel or No.  The engine's ``host.ask``
+    releases held input and re-activates the window context around the
+    dialog, so the action does neither.
     """
     e = row.event
     if e["var_name"]:
@@ -129,7 +131,6 @@ def _play_box(ctx: PlayContext, row: Row) -> Flow | Jump | Abort:
         answer = buttons[-1]
     if e["var_name"]:
         ctx.variables[e["var_name"]] = answer
-    ctx.reactivate_context()
     target = e["target_" + answer]
     return Jump(target) if target else Flow.NEXT
 

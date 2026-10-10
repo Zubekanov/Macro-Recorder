@@ -160,12 +160,12 @@ def test_drag_becomes_down_path_up():
                   release(1.7, 60, 30))
     assert summary(rows) == [
         ("down", "left", 10, 10),
-        ("wait", 100),
         ("path", ((20, 15), (40, 25), (60, 30))),
         ("wait", 200),
         ("up", "left", 60, 30),
     ]
-    path = rows[2]
+    path = rows[1]
+    assert path.delay_ms == 100         # exactly min_wait_ms is a delay, not a wait
     assert [round(e.dt, 3) for e in path.events] == [0.0, 0.1, 0.3]
 
 

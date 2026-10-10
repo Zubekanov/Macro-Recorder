@@ -87,7 +87,8 @@ def _on_timeout(row: Row, message: str) -> Flow | Jump | Abort:
 
 
 def _image_file(ctx: PlayContext, path: str) -> str:
-    """A relative image path is read from the macro's folder."""
+    """``~`` is expanded, as validation does; a relative path is read from the macro's folder."""
+    path = os.path.expanduser(path)
     if ctx.document_dir and not os.path.isabs(path):
         return os.path.join(ctx.document_dir, path)
     return path

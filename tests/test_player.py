@@ -922,10 +922,12 @@ def test_log_and_run_command(no_spacing, tmp_path, plays):
     assert (tmp_path / "out.txt").read_text().strip() == str(tmp_path)
 
 
-def test_exec_failure_aborts(no_spacing):
-    rows = [make_row(make("exec_program", command="sleep 5", wait_exit=True, timeout_ms=100))]
+def test_exec_timeout_returns_none(no_spacing):
+    rows = [make_row(make("exec_program", command="sleep 5", wait_exit=True, timeout_ms=100,
+                          var_name="code"))]
     rig = Rig(rows, no_spacing).play()
-    assert rig.error == "Row 1: 'sleep 5' did not finish within 100 ms"
+    assert rig.error is None
+    assert rig.player.variables["code"] is None
 
 
 # ---------------------------------------------------------------------------

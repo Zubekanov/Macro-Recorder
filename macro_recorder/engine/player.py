@@ -572,9 +572,14 @@ class Player:
         return False
 
     def _ask(self, title: str, text: str, buttons: str) -> str | None:
+        """Ask the host with held input released; restore it unless playback stops.
+
+        A None answer means playback stopped, so nothing is re-pressed or
+        re-activated before the action ends the run.
+        """
         self._release_held()
         answer = self._host.ask(title, text, buttons)
-        if self._stop.is_set():
+        if answer is None or self._stop.is_set():
             return None
         self._restore_after_interruption()
         return answer
@@ -769,10 +774,20 @@ class Player:
         return self._row_states.setdefault(row_id, {})
 
     def run_command(self, command: str, wait: bool, timeout_ms: float = 0) -> int | None:
-        """Run a shell command in the macro's folder (or $HOME).  Not scaled by speed."""
+        """Run a shell command in the macro's folder (or $HOME).  Not scaled by speed.
+
+        Returns the exit code when waited for, and None when the wait timed
+        out (the command is terminated) or playback stopped.  Raises OSError
+        when the command cannot be started.
+        """
         try:
             return processes.run(command, self.document_dir, wait, timeout_ms, self._stop,
                                  self._children)
+        except processes.ProcessTimeout:
+            return None
+        except processes.ProcessError as e:
+            cause = e.__cause__
+            raise OSError(str(cause) if isinstance(cause, OSError) else str(e)) from e
         finally:
             if wait:
                 self._reset_schedule()
