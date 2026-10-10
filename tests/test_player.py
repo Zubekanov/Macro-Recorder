@@ -7,18 +7,10 @@ these tests swap minimal ones into the catalogue (see :func:`plays`).
 from __future__ import annotations
 
 import dataclasses
-import importlib.util
-import sys
 import threading
 import time
 
 import pytest
-
-if importlib.util.find_spec("macro_recorder.engine.expressions") is None:
-    # engine/expressions.py arrives with the model-core work package; until it
-    # is merged the previous evaluator, which has the same three names, stands in.
-    import macro_recorder.expressions as _previous_expressions
-    sys.modules["macro_recorder.engine.expressions"] = _previous_expressions
 
 from macro_recorder.engine import player as player_mod
 from macro_recorder.engine.player import REPEAT_COUNTER, Player

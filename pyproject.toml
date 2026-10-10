@@ -1,12 +1,11 @@
 [project]
 name = "macro-recorder"
-version = "0.2.0"
+version = "0.3.0"
 description = "Record, edit and replay mouse and keyboard macros on Linux (X11)"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
-    "pynput>=1.8",
     "python-xlib>=0.33",
     "Pillow>=10",
     "mss>=9",

@@ -1,10 +1,11 @@
 __pycache__/
 *.py[cod]
 .venv/
+.venv-wp10/
 .pytest_cache/
 build/
 dist/
 *.egg-info/
-recording_*.json
+recording-*.json
 *.log
 .claude/

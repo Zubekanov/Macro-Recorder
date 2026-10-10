@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Set up Macro Recorder on Linux Mint (or any Debian/Ubuntu-based X11 desktop).
 #
-# - installs the system packages the app needs (Tesseract for OCR,
-#   a compiler for the evdev build, Xvfb for the tests); uv brings its own Python with Tk
+# - installs the system packages the app needs (Tesseract for OCR, Xvfb for
+#   the tests); uv brings its own Python with Tk
 # - installs uv if it is missing, then syncs the Python environment
 # - adds a "Macro Recorder" launcher to the applications menu
 #
@@ -14,7 +14,7 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 echo "==> Installing system packages (sudo)"
 sudo apt-get update -qq
-sudo apt-get install -y python3-dev build-essential tesseract-ocr xvfb
+sudo apt-get install -y tesseract-ocr xvfb
 
 if ! command -v uv >/dev/null 2>&1; then
     echo "==> Installing uv"

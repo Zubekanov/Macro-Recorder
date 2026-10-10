@@ -17,9 +17,9 @@ work packages, their file ownership and what is out of scope.
   its fields, defaults, Details layout, Value text, overlay, validation and
   playback. Adding an action touches one category module.
 - `model/` and `engine/expressions.py` import nothing from tkinter or Xlib.
-  `platform/` is the only package that talks to the X server. pynput is not
-  used; python-xlib covers recording (XRecord), injection (XTest), the stop
-  key and hotkeys (XInput2, XGrabKey) and window management (EWMH).
+  `platform/` is the only package that talks to the X server. python-xlib
+  covers recording (XRecord), injection (XTest), the stop key and hotkeys
+  (XInput2, XGrabKey) and window management (EWMH).
 - Worker threads never call Tk. They post to a queue the main thread drains.
 - Tests never touch the user's display. Anything that opens a window or
   reads input runs only under Xvfb, behind a marker.
@@ -43,7 +43,7 @@ work packages, their file ownership and what is out of scope.
 | `macro_recorder/engine/recorder.py` | Drives the platform listener into a raw event stream with own-window filtering. |
 | `macro_recorder/engine/paths.py` | Pure path generators: linear, spline, natural. |
 | `macro_recorder/engine/screen.py` | Screen capture (mss), image find (OpenCV), pixel read, OCR (Tesseract). |
-| `macro_recorder/engine/processes.py` | Runs launch and exec_program commands, reaps children. |
+| `macro_recorder/engine/processes.py` | Runs launch and exec_program commands, reaps children. `run` returns the exit code, None when stopped, and raises `ProcessTimeout` when `timeout_ms` passes (the group is killed first) or `ProcessError` when the command cannot start. |
 | `macro_recorder/platform/session.py` | X11 vs Wayland detection, server time, own-window registry. |
 | `macro_recorder/platform/x11.py` | python-xlib helpers: EWMH, geometry, activation, workspaces, SHAPE, XTest, XRecord, XInput2 raw events, XGrabKey. |
 | `macro_recorder/platform/windows.py` | `WindowManager` on one locked display connection; a `NullWindowManager`. |
@@ -61,12 +61,6 @@ work packages, their file ownership and what is out of scope.
 | `macro_recorder/gui/hotkeys.py` | Routes grabbed hotkeys and stop keys by mode. |
 | `macro_recorder/gui/settings.py` | `Settings` dataclass, load and save, the Settings dialog. |
 | `macro_recorder/gui/dialogs.py` | Unsaved-changes prompt, error dialog, message_box dialog. |
-
-The previous modules (`macro.py`, `run.py`, `main.py`, `player.py`,
-`recorder.py`, `table_model.py`, `bundling.py`, `undo.py`,
-`window_manager.py`, `x11.py`, `overlay_renderer.py`, `matching.py`,
-`ocr.py`, `expressions.py`, `event_types.py`) are deleted in the last work
-package; nothing imports them once the new packages exist.
 
 ## Document model
 
@@ -190,8 +184,10 @@ once:
    with the modifiers. Repeated presses of a held key collapse. A press
    with no release, or a release with no press, is dropped and logged.
 7. The gap between two rows runs from the last event of the earlier row to
-   the first of the later one. Over `min_wait_ms` it becomes a `wait` row
-   with that duration; otherwise it becomes the later row's `delay_ms`.
+   the first of the later one. A `key_combo` ends at its main key's
+   release, so modifiers released after it count towards the gap. Over
+   `min_wait_ms` the gap becomes a `wait` row with that duration; otherwise
+   it becomes the later row's `delay_ms`.
 8. Recording starts with a window row for the active window unless that is
    an application window.
 
@@ -362,7 +358,9 @@ Dynamic values, read-only: `rt_ms` (playback time excluding pauses),
   and blocks until `resume()` or `stop()`. On resume it re-activates the
   context window (no launch, no move) and waits for confirmation, re-presses
   the remembered keys and buttons, and resets the schedule clock. The same
-  happens after `host.ask` returns. Paused time is excluded from `rt_ms`.
+  happens when `ctx.host.ask` returns: the engine wraps the host, so an
+  action that asks does not call `reactivate_context` itself. Paused time is
+  excluded from `rt_ms`.
 - Repeat count applies to the whole program; 0 repeats until stopped.
 - There is no step limit. A run of more than 10 000 rows without a wait in
   one second sleeps 1 ms per row so Esc stays responsive.
@@ -424,9 +422,9 @@ from the active-window watcher.
 | Concern | Implementation |
 |---|---|
 | Session | `session.check()` refuses recording and playback when `XDG_SESSION_TYPE` is `wayland`, `WAYLAND_DISPLAY` is set, or `DISPLAY` is unset. The GUI shows a dialog and disables Record and Play; the CLI exits 2. |
-| Keys | The model stores X keysym names (`a`, `KP_1`, `Return`, `Control_L`, `F6`). Combos are `ctrl+shift+s` with aliases `ctrl`, `shift`, `alt`, `super` and are shown as `Ctrl+Shift+S`. `input.py` converts a name to a keycode with `keysym_to_keycode`, borrowing a spare keycode for unmapped keysyms and restoring it after. A `live_x` test resolves every name in the table. |
+| Keys | The model stores X keysym names (`a`, `KP_1`, `Return`, `Control_L`, `F6`). Combos are `ctrl+shift+s` with aliases `ctrl`, `shift`, `alt`, `super` and are shown as `Ctrl+Shift+S`. A lone `+` and a trailing `++` (`ctrl++`) are the plus key; a single trailing `+` (`ctrl+`) leaves the key out and is an error. `input.py` converts a name to a keycode with `keysym_to_keycode`, borrowing a spare keycode for unmapped keysyms and restoring it after. A `live_x` test resolves every name in the table. |
 | Injection | XTest only, through `InputBackend`: `move(x, y)`, `press_button`, `release_button`, `scroll(dx, dy)`, `press_key(name)`, `release_key(name)`, `type_text(text)`. The backend counts every synthetic key it sends, by keycode, for the stop-key fallback. |
-| Recording stream | `InputListener` on XRecord with its own two connections, like pynput's design: KeyPress and KeyRelease with keycode and state mapped to a keysym name, ButtonPress, ButtonRelease and MotionNotify with root coordinates. |
+| Recording stream | `InputListener` on XRecord with its own two connections (one blocks in the record context, one controls it): KeyPress and KeyRelease with keycode and state mapped to a keysym name, ButtonPress, ButtonRelease and MotionNotify with root coordinates. |
 | Stop key | `StopKeyWatcher` selects `XI_RawKeyPress` on the root through XInput2 (python-xlib provides the masks; `x11.py` registers a raw event decoder with `ge_add_event_data`) and ignores events whose `sourceid` is the `Virtual core XTEST keyboard` slave. Synthetic Esc, including autorepeat of a held synthetic Esc, never counts as the user. Where XInput2 2.1 is unavailable the fallback uses XRecord and the injector's counter, ignoring Esc while the injector holds it. |
 | Global hotkeys | `HotkeyGrabber` grabs each combo on the root with `XGrabKey` in the Lock and Mod2 mask variants, so other applications do not see it. A failed grab is reported in the Settings dialog. `Ctrl+Alt+F1..F12`, `Ctrl+Alt+Backspace` and `Ctrl+Alt+Delete` are rejected. Defaults: record toggle `Ctrl+Shift+F9`, play `Ctrl+Shift+F5`. Esc and F6 are observed, never grabbed. |
 | Windows | EWMH through one locked connection, with core-protocol fallbacks for Xvfb. `WindowManager`: `list()`, `active()`, `find(pattern, mode)`, `activate(win, settle_ms) -> WindowInfo | None`, `move(win, rect, settle_ms) -> WindowInfo | None`, `set_maximised(win, bool)`, `watch_active(callback) -> stop`, `bell()`, `monitors()`. `WindowInfo` carries id, title, outer rect, client rect, desktop, maximised. `ConnectionClosedError` drops the cached display. |
