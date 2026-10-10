@@ -30,6 +30,11 @@ Decisions where the design is silent:
   Ctrl+S followed by a Ctrl+click replays both correctly.  A combo's
   modifiers are those absorbed or still undecided; a modifier already
   emitted as ``key_press`` is not repeated in the combo.
+- When a key that absorbed modifiers becomes a ``key_press`` half (key
+  rollover, or a key held across a click), its modifiers get ``key_press``
+  rows just before it, timed at their own presses.  A modifier that is
+  still down is released by its own ``key_release`` row later; one already
+  released gets its ``key_release`` row placed at its release time.
 - A press and release that are neither a click (rule 2) nor a drag (rule 3),
   such as a long press in place, become ``down``, any path, and ``up``.  Any
   other row between a press and its release (a key, a scroll, another
@@ -40,8 +45,9 @@ Decisions where the design is silent:
 - A scroll between two different points (``min_move_px`` apart), in another
   direction, or after more than ``min_wait_ms`` starts a new scroll row.  A
   summed scroll takes ``notch_ms`` from the mean notch interval.
-- With ``record_paths`` off, free movement is not recorded at all; only a
-  drag's movement becomes a ``mouse_move_timed``.
+- With ``record_paths`` off, free movement is not recorded at all; only the
+  movement while a button is down becomes a ``mouse_move_timed``, ending at
+  the release point when the release closes it.
 - A window row immediately followed by another window row is dropped (the
   later one wins), and a marker equal to the last window row is ignored.
 - A button press without a release takes its ``down`` row and its unflushed
@@ -206,6 +212,7 @@ class _PressUnit:
     slot: _Draft
     merge_into: _Draft | None = None        # the click this press may raise to a double-click
     clean: bool = True                      # False once its down row is emitted
+    origin: tuple[int, int] = (0, 0)        # where the next timed move starts
     points: list[tuple[int, int, float]] = field(default_factory=list)
     first_motion: float | None = None
     last_motion: float | None = None
@@ -218,6 +225,8 @@ class _HeldKey:
     mods: tuple[str, ...]
     state: str                  # pending | held | absorbed
     slot: _Draft | None
+    # absorbed modifiers already let go: name -> (press time, release time)
+    mod_releases: dict[str, tuple[float, float]] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -444,7 +453,7 @@ class StreamBundler:
         slot = _Draft(_PRESS, e.time, e.time,
                       {"x": e.x, "y": e.y, "button": e.button}, open=True)
         self._append(slot, needs_modifiers=True)
-        unit = _PressUnit(e, slot)
+        unit = _PressUnit(e, slot, origin=(e.x, e.y))
         if previous is not None and previous is self._last_before(slot) \
                 and continues_click(previous, e, self.settings):
             unit.merge_into = previous
@@ -472,7 +481,9 @@ class StreamBundler:
             self._finish_click(unit, e)
             return
         if unit.clean:
-            self._emit_down(unit)
+            self._emit_down(unit, e)
+        elif not self.settings.record_paths:
+            self._emit_movement(unit, e)
         self._pointer = (e.x, e.y)
         self._append(_Draft(EventType.MOUSE_CLICK.value, e.time, e.time,
                             {"x": e.x, "y": e.y, "button": e.button, "action": "up"}))
@@ -504,8 +515,11 @@ class StreamBundler:
         if self._clean_unit is not None:
             self._emit_down(self._clean_unit)
 
-    def _emit_down(self, unit: _PressUnit) -> None:
-        """Rule 3: the press becomes ``down`` followed by the movement so far."""
+    def _emit_down(self, unit: _PressUnit, release: RawEvent | None = None) -> None:
+        """Rule 3: the press becomes ``down`` followed by the movement so far.
+
+        ``release`` is given when the button's release closes the unit.
+        """
         press, slot = unit.press, unit.slot
         slot.type = EventType.MOUSE_CLICK.value
         slot.params = {"x": press.x, "y": press.y, "button": press.button, "action": "down"}
@@ -514,22 +528,55 @@ class StreamBundler:
         unit.merge_into = None
         if self._clean_unit is unit:
             self._clean_unit = None
-        if not unit.points:
-            return
+        self._emit_movement(unit, release)
+
+    def _emit_movement(self, unit: _PressUnit, release: RawEvent | None) -> None:
+        """The movement collected while the button is down: a path or a timed move.
+
+        A timed move (``record_paths`` off) runs from where the last one
+        ended to the release point, or to the last kept sample when the
+        unit is interrupted.
+        """
         if self.settings.record_paths:
-            first = unit.points[0]
-            self._push(_Draft(_PATH, first[2], unit.points[-1][2], points=list(unit.points)))
+            if unit.points:
+                first = unit.points[0]
+                self._push(_Draft(_PATH, first[2], unit.points[-1][2], points=list(unit.points)))
+            unit.points = []
+            return
+        if release is not None:
+            end = (release.x, release.y, release.time)
+            if not unit.points and not point_kept(unit.origin, release.x, release.y, self.settings):
+                return
+        elif unit.points:
+            end = unit.points[-1]
         else:
-            last = unit.points[-1]
-            self._push(_Draft(EventType.MOUSE_MOVE_TIMED.value, unit.first_motion, unit.last_motion, {
-                "x": press.x, "y": press.y, "x2": last[0], "y2": last[1],
-                "duration_ms": int(round((unit.last_motion - unit.first_motion) * 1000))}))
+            return
+        start = unit.first_motion if unit.first_motion is not None else end[2]
+        self._push(_Draft(EventType.MOUSE_MOVE_TIMED.value, start, end[2], {
+            "x": unit.origin[0], "y": unit.origin[1], "x2": end[0], "y2": end[1],
+            "duration_ms": int(round(max(0.0, end[2] - start) * 1000))}))
+        unit.origin = (end[0], end[1])
         unit.points = []
+        unit.first_motion = None
+        unit.last_motion = None
+
+    def _motion_unit(self) -> _PressUnit | None:
+        """The held button that collects a motion sample, if any.
+
+        A unit whose down row is not out yet always does; with
+        ``record_paths`` off the latest held button does too, because free
+        movement is not recorded then.
+        """
+        if self._clean_unit is not None:
+            return self._clean_unit
+        if not self.settings.record_paths and self._buttons:
+            return next(reversed(self._buttons.values()))
+        return None
 
     def _on_motion(self, e: RawEvent) -> None:
-        unit = self._clean_unit
+        unit = self._motion_unit()
         if unit is not None:
-            ref = (unit.points[-1][0], unit.points[-1][1]) if unit.points else (unit.press.x, unit.press.y)
+            ref = (unit.points[-1][0], unit.points[-1][1]) if unit.points else unit.origin
             if unit.first_motion is None:
                 unit.first_motion = e.time
             unit.last_motion = e.time
@@ -576,9 +623,10 @@ class StreamBundler:
         """Rule 6: a row between a key's press and release ends its chance of a tap.
 
         A modifier followed by another key press is absorbed into that key's
-        combo; anything else makes the key a held ``key_press``.
+        combo; anything else makes the key a held ``key_press``, preceded by
+        ``key_press`` rows for the modifiers it absorbed.
         """
-        for hk in self._keys.values():
+        for hk in list(self._keys.values()):
             if hk.state != "pending":
                 continue
             assert hk.slot is not None
@@ -592,22 +640,60 @@ class StreamBundler:
                 hk.slot.type = EventType.KEY_PRESS.value
                 hk.slot.params = {"key": hk.key}
                 hk.slot.open = False
+                self._hold_mods_of(hk)
+
+    def _hold_mods_of(self, hk: _HeldKey) -> None:
+        """Give the modifiers absorbed by ``hk`` their own rows around its ``key_press``."""
+        assert hk.slot is not None
+        for name in hk.mods:
+            mod = self._keys.get(name)
+            if mod is not None and mod.state == "absorbed":
+                self._hold_modifier(mod, mod.time, before=hk.slot)
+            elif name in hk.mod_releases:
+                pressed, released = hk.mod_releases[name]
+                at = self._drafts.index(hk.slot)
+                self._drafts.insert(at, _Draft(EventType.KEY_PRESS.value, pressed, pressed, {"key": name}))
+                at += 2
+                while at < len(self._drafts) and self._drafts[at].start <= released:
+                    at += 1
+                self._drafts.insert(at, _Draft(EventType.KEY_RELEASE.value, released, released, {"key": name}))
+        hk.mods = ()
+        hk.mod_releases.clear()
+
+    def _hold_modifier(self, mod: _HeldKey, time: float, before: _Draft | None = None) -> None:
+        """Turn an absorbed modifier into a held ``key_press`` row.
+
+        The row goes just before ``before``, or after everything so far.  The
+        modifier leaves the combos of keys still undecided, since replay now
+        holds it down for them.
+        """
+        mod.state = "held"
+        mod.slot = _Draft(EventType.KEY_PRESS.value, time, time, {"key": mod.key})
+        if before is None:
+            self._push(mod.slot)
+        else:
+            self._drafts.insert(self._drafts.index(before), mod.slot)
+        for hk in self._keys.values():
+            if hk.state == "pending" and mod.key in hk.mods:
+                hk.mods = tuple(m for m in hk.mods if m != mod.key)
+                assert hk.slot is not None
+                hk.slot.params["names"] = hk.mods + (hk.key,)
 
     def _hold_absorbed_modifiers(self, time: float) -> None:
         """Modifiers still down from a combo are pressed again before a click or scroll."""
-        for hk in self._keys.values():
+        for hk in list(self._keys.values()):
             if hk.state == "absorbed":
-                hk.state = "held"
-                hk.slot = _Draft(EventType.KEY_PRESS.value, time, time, {"key": hk.key})
-                self._push(hk.slot)
+                self._hold_modifier(hk, time)
 
     def _on_key_press(self, e: RawEvent) -> None:
         if e.key in self._keys:
             return                                  # autorepeat of a held key
-        mods = tuple(k for k, hk in self._keys.items()
-                     if is_modifier(k) and hk.state in ("pending", "absorbed"))
-        slot = _Draft(_PENDING_KEY, e.time, e.time, {"names": mods + (e.key,)}, open=True)
+        slot = _Draft(_PENDING_KEY, e.time, e.time, {}, open=True)
         self._append(slot, key_slot=True)
+        # Settling the keys absorbed every undecided modifier; those still
+        # absorbed (not held as key_press rows) belong to this key's combo.
+        mods = tuple(k for k, hk in self._keys.items() if hk.state == "absorbed")
+        slot.params["names"] = mods + (e.key,)
         self._keys[e.key] = _HeldKey(e.key, e.time, mods, "pending", slot)
 
     def _on_key_release(self, e: RawEvent) -> None:
@@ -616,6 +702,9 @@ class StreamBundler:
             self.dropped.append("Dropped a %s key release with no press" % e.key)
             return
         if hk.state == "absorbed":
+            for other in self._keys.values():
+                if other.state == "pending" and e.key in other.mods:
+                    other.mod_releases[e.key] = (hk.time, e.time)
             return
         if hk.state == "pending":
             assert hk.slot is not None

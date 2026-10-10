@@ -172,8 +172,20 @@ def test_drag_becomes_down_path_up():
 def test_drag_without_record_paths_is_timed_move():
     rows = bundle(press(1.0, 10, 10), move(1.1, 20, 15), move(1.2, 40, 25), move(1.5, 60, 30),
                   release(1.55, 60, 30), record_paths=False)
-    assert no_waits(rows) == [("down", "left", 10, 10), ("timed", 10, 10, 60, 30, 400),
+    assert no_waits(rows) == [("down", "left", 10, 10), ("timed", 10, 10, 60, 30, 450),
                               ("up", "left", 60, 30)]
+
+
+def test_timed_move_ends_at_the_release_point():
+    rows = bundle(press(0.0, 0, 0), move(0.1, 20, 0), release(0.2, 40, 0), record_paths=False)
+    assert no_waits(rows) == [("down", "left", 0, 0), ("timed", 0, 0, 40, 0, 100), ("up", "left", 40, 0)]
+
+
+def test_timed_move_continues_after_an_interruption():
+    rows = bundle(press(0.0, 0, 0), move(0.05, 10, 0), tap(0.1, "a"), move(0.15, 30, 0),
+                  release(0.2, 40, 0), record_paths=False)
+    assert no_waits(rows) == [("down", "left", 0, 0), ("timed", 0, 0, 10, 0, 0), ("key", "a"),
+                              ("timed", 10, 0, 40, 0, 50), ("up", "left", 40, 0)]
 
 
 def test_fast_flick_far_away_is_a_drag_not_a_click():
@@ -303,6 +315,43 @@ def test_combo_modifier_still_held_at_click_is_pressed_again():
     assert no_waits(rows) == [("key", "ctrl+s"), ("key_press", "Control_L"),
                               ("click", "left", 10, 10, 1), ("key", "v"),
                               ("key_release", "Control_L")]
+
+
+def test_ctrl_held_over_a_rollover_keeps_the_modifier():
+    rows = bundle(kdown(0.0, "Control_L"), kdown(0.1, "c"), kdown(0.15, "v"), kup(0.2, "c"),
+                  kup(0.25, "v"), kup(0.3, "Control_L"))
+    assert summary(rows) == [("key_press", "Control_L"), ("key_press", "c"), ("key_press", "v"),
+                             ("key_release", "c"), ("key_release", "v"), ("key_release", "Control_L")]
+    assert [r.delay_ms for r in rows] == [0, 100, 50, 50, 50, 50]
+
+
+def test_shift_held_over_a_rollover_of_capitals():
+    rows = bundle(kdown(0.0, "Shift_L"), kdown(0.1, "H"), kdown(0.15, "I"), kup(0.2, "H"),
+                  kup(0.25, "I"), kup(0.3, "Shift_L"))
+    assert summary(rows) == [("key_press", "Shift_L"), ("key_press", "H"), ("key_press", "I"),
+                             ("key_release", "H"), ("key_release", "I"), ("key_release", "Shift_L")]
+
+
+def test_key_held_across_a_click_with_ctrl_held():
+    rows = bundle(kdown(0.0, "Control_L"), kdown(0.1, "a"), click(0.2), kup(0.4, "a"),
+                  kup(0.5, "Control_L"))
+    assert no_waits(rows) == [("key_press", "Control_L"), ("key_press", "a"),
+                              ("click", "left", 10, 10, 1), ("key_release", "a"),
+                              ("key_release", "Control_L")]
+
+
+def test_rollover_tap_does_not_repeat_a_held_modifier():
+    rows = bundle(kdown(0.0, "Control_L"), kdown(0.1, "c"), tap(0.15, "v", 0.02), kup(0.2, "c"),
+                  kup(0.3, "Control_L"))
+    assert summary(rows) == [("key_press", "Control_L"), ("key_press", "c"), ("key", "v"),
+                             ("key_release", "c"), ("key_release", "Control_L")]
+
+
+def test_modifier_released_before_its_key_turns_held():
+    rows = bundle(kdown(0.0, "Control_L"), kdown(0.1, "c"), kup(0.15, "Control_L"), kdown(0.2, "v"),
+                  kup(0.25, "c"), kup(0.3, "v"))
+    assert summary(rows) == [("key_press", "Control_L"), ("key_press", "c"), ("key_release", "Control_L"),
+                             ("key_press", "v"), ("key_release", "c"), ("key_release", "v")]
 
 
 def test_overlapping_keys_become_halves():

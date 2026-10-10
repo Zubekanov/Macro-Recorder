@@ -18,6 +18,9 @@ Decisions where the design is silent:
   stream, before the GUI gets round to calling :meth:`Recorder.stop`, so the
   combo's modifier releases never reach the stream.  The walk back that
   removes trailing modifier presses without releases runs on every halt.
+- An X query that fails during a hit test or an active-window check (a
+  window closing at that moment, say) is logged and the window is treated
+  as foreign, so the event is kept and the listener keeps running.
 """
 
 from __future__ import annotations
@@ -79,11 +82,18 @@ class Recorder:
         self._dropped_keys: set[str] = set()    # keys whose press was dropped
         self._kept_buttons: set[str] = set()
         self._dropped_buttons: set[str] = set()
+        self._start_key: str | None = None      # the key that started recording, until released
 
     # ------------------------------------------------------------ lifecycle
 
-    def start(self) -> None:
-        """Start the watcher and the listener; returns once events flow."""
+    def start(self, start_key: str | None = None) -> None:
+        """Start the watcher and the listener; returns once events flow.
+
+        ``start_key`` names the key of the hotkey that started the recording
+        (``F9`` for ``ctrl+shift+F9``), which may still be held: its presses,
+        autorepeat included, are dropped until its first release.  Raises
+        RecorderError when the recording cannot start.
+        """
         with self._lock:
             if self._started:
                 raise RuntimeError("A recorder records once")
@@ -91,15 +101,19 @@ class Recorder:
             self._t0 = self._clock()
             self._accepting = True
             self._running = True
-        active = self._windows.active()
-        if active is not None and self._wanted_marker(active):
-            with self._lock:
-                self._events.append(RawEvent("window_focus", 0.0, window=active))
-        self._unwatch = self._windows.watch_active(self._on_active)
+            self._start_key = start_key.lower() if start_key else None
         try:
+            active = self._windows.active()
+            if active is not None and self._wanted_marker(active):
+                with self._lock:
+                    self._events.append(RawEvent("window_focus", 0.0, window=active))
+            self._unwatch = self._windows.watch_active(self._on_active)
             self._listener.start(self._on_raw)
         except Exception as e:
-            self.stop()
+            try:
+                self.stop()
+            except Exception:
+                log.exception("Recording: clean-up after a failed start failed")
             raise RecorderError("Could not start recording: %s" % e) from e
 
     def stop(self) -> None:
@@ -110,10 +124,12 @@ class Recorder:
             running, self._running = self._running, False
         if not running:
             return
-        if self._unwatch is not None:
-            self._unwatch()
-            self._unwatch = None
-        self._listener.stop()
+        unwatch, self._unwatch = self._unwatch, None
+        try:
+            if unwatch is not None:
+                unwatch()
+        finally:
+            self._listener.stop()
 
     @property
     def recording(self) -> bool:
@@ -176,11 +192,21 @@ class Recorder:
                 self._events.append(RawEvent("window_focus", t, window=info))
 
     def _own_at(self, x: int, y: int) -> bool:
-        wid = self._windows.window_at(x, y)
+        try:
+            wid = self._windows.window_at(x, y)
+        except Exception:
+            log.warning("Recording: hit test at (%d, %d) failed; treating it as foreign",
+                        x, y, exc_info=True)
+            return False
         return wid is not None and self._own.contains(wid)
 
     def _own_active(self) -> bool:
-        active = self._windows.active()
+        try:
+            active = self._windows.active()
+        except Exception:
+            log.warning("Recording: active window query failed; treating it as foreign",
+                        exc_info=True)
+            return False
         return active is not None and self._own.contains(active.id)
 
     def _on_raw(self, event: RawEvent) -> None:
@@ -224,6 +250,8 @@ class Recorder:
     def _filter_key_press(self, e: RawEvent, own: bool) -> bool:
         key = e.key
         self._down.add(key)
+        if key.lower() == self._start_key:
+            return False                        # the start hotkey still held
         if key in self._kept_keys:
             return True                         # autorepeat
         if key in self._dropped_keys:
@@ -243,6 +271,8 @@ class Recorder:
         key = e.key
         self._down.discard(key)
         self._dropped_keys.discard(key)
+        if key.lower() == self._start_key:
+            self._start_key = None
         if key in self._kept_keys:
             self._kept_keys.discard(key)
             return True

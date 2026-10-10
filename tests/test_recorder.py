@@ -195,6 +195,65 @@ def test_record_combo_halts_and_cleans_trailing_modifiers(rig):
                                             ("motion", "")]
 
 
+def test_held_start_hotkey_autorepeat_is_dropped_until_released(rig):
+    recorder, listener, windows, clock = rig
+    recorder.start(start_key="F9")
+    listener.feed(ev("key_press", 0.5, key="F9"), ev("key_press", 0.55, key="F9"),
+                  ev("key_release", 0.6, key="F9"), ev("key_release", 0.7, key="Shift_L"),
+                  ev("key_release", 0.75, key="Control_L"), ev("key_press", 1.0, key="F9"),
+                  ev("key_release", 1.1, key="F9"))
+    assert recorder.recording
+    recorder.stop()
+    assert kinds(recorder.result())[1:] == [("key_press", "F9"), ("key_release", "F9")]
+
+
+def test_record_combo_still_stops_after_the_start_key_is_released(rig):
+    recorder, listener, windows, clock = rig
+    recorder.start(start_key="F9")
+    listener.feed(ev("key_release", 0.1, key="F9"), ev("key_press", 1.0, key="Control_L"),
+                  ev("key_press", 1.1, key="Shift_L"), ev("key_press", 1.2, key="F9"))
+    assert recorder.stop_requested
+
+
+def test_failed_hit_test_treats_the_window_as_foreign(rig, caplog):
+    recorder, listener, windows, clock = rig
+
+    def broken(x, y):
+        raise OSError("BadWindow")
+    windows.window_at = broken
+    recorder.start()
+    listener.feed(ev("button_press", 0.1, x=1600, y=100, button="left"),
+                  ev("button_release", 0.2, x=1600, y=100, button="left"))
+    recorder.stop()
+    assert kinds(recorder.result())[1:] == [("button_press", "left"), ("button_release", "left")]
+    assert "hit test" in caplog.text
+
+
+def test_failed_active_query_while_recording_keeps_the_key(rig, caplog):
+    recorder, listener, windows, clock = rig
+    recorder.start()
+
+    def broken():
+        raise OSError("connection closed")
+    windows.active = broken
+    listener.feed(ev("key_press", 0.1, key="a"), ev("key_release", 0.2, key="a"))
+    recorder.stop()
+    assert kinds(recorder.result())[1:] == [("key_press", "a"), ("key_release", "a")]
+    assert "active window query failed" in caplog.text
+
+
+def test_failed_active_query_at_start_raises_recorder_error(rig):
+    recorder, listener, windows, clock = rig
+
+    def broken():
+        raise OSError("connection closed")
+    windows.active = broken
+    with pytest.raises(RecorderError, match="connection closed"):
+        recorder.start()
+    assert not listener.is_alive()
+    assert not recorder.recording
+
+
 def test_combo_key_without_its_modifiers_is_recorded(rig):
     recorder, listener, windows, clock = rig
     recorder.start()

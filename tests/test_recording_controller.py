@@ -218,3 +218,39 @@ def test_recording_settings_are_read_at_start(record_paths):
     rig.feed(rig.ev("motion", 0.05, x=10, y=10), rig.ev("motion", 0.07, x=40, y=10))
     rig.controller.stop()
     assert ("mouse_move" in types(rig.document.rows)) is record_paths
+
+
+def test_settings_changed_mid_recording_do_not_apply():
+    rig = Rig()
+    rig.controller._settings.recording.record_paths = True
+    rig.controller.start(None)
+    rig.controller._settings.recording.record_paths = False
+    rig.feed(rig.ev("motion", 0.05, x=10, y=10), rig.ev("motion", 0.07, x=40, y=10))
+    rig.controller.poll()
+    assert "mouse_move" in types(rig.shell.provisional[-1])
+    rig.controller.stop()
+    assert "mouse_move" in types(rig.document.rows)
+
+
+def test_recorder_stop_failure_still_inserts_and_goes_idle():
+    rig = Rig()
+    rig.controller.start(None)
+    rig.tap(0.5, "a")
+
+    def broken():
+        raise OSError("listener stuck")
+    rig.listener.stop = broken
+    ids = rig.controller.stop()
+    assert not rig.controller.recording
+    assert types(rig.document.rows) == ["window_focus", "wait", "key_combo"]
+    assert len(ids) == 3
+    assert rig.shell.cleared == 1 and rig.shell.modes == ["recording", "idle"]
+    assert "listener stuck" in rig.shell.errors[0]
+
+
+def test_start_key_reaches_the_recorder():
+    rig = Rig()
+    rig.controller.start(None, start_key="F9")
+    rig.feed(rig.ev("key_press", 0.5, key="F9"), rig.ev("key_release", 0.6, key="F9"))
+    rig.controller.stop()
+    assert types(rig.document.rows) == ["window_focus"]
