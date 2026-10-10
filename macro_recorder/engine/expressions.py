@@ -245,7 +245,6 @@ def _arithmetic(op: ast.operator, left: Any, right: Any) -> Any:
     return _ARITHMETIC[type(op)](left, right)
 
 
-
 def _eval(node: ast.AST, variables: Mapping[str, Any]) -> Any:
     if isinstance(node, ast.Constant):
         return node.value
@@ -330,6 +329,10 @@ def resolve_number(value: Any, variables: Mapping[str, Any]) -> int | float:
         raise ExpressionError("Expected a number or an expression, not %r" % (value,))
     if isinstance(result, float) and not math.isfinite(result):
         raise ExpressionError("%r is not a finite number" % (value,))
+    try:
+        float(result)
+    except OverflowError:
+        raise ExpressionError("%r is too large to use as a number" % (value,)) from None
     return result
 
 

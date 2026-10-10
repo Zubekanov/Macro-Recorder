@@ -30,6 +30,10 @@ from macro_recorder.model.events import EVENT_TYPE_VALUES, EventType, MacroEvent
 
 FORMAT_VERSION = 3
 
+# The largest number a file may hold, in either sign: 2 ** 53 keeps every
+# whole number exact as a float, and a larger one has no use in a macro.
+MAX_MAGNITUDE = 2 ** 53
+
 COLOUR_RE = re.compile(r"#[0-9a-fA-F]{6}\Z")
 
 _TOP_KEYS = ("version", "filter", "path_mode", "rows")
@@ -122,26 +126,34 @@ def dumps(data: Mapping[str, Any]) -> str:
 def save(document: MacroDocument, path: str | os.PathLike[str]) -> None:
     """Write the document atomically.
 
-    Symlinks are resolved so the link survives.  The text goes to
-    ``.<name>.tmp`` beside the target, created with the target's mode when it
-    exists, then is flushed, fsynced and moved over the target with
-    ``os.replace``; the directory is fsynced last.  On failure the target is
-    untouched and the temporary file removed.  The caller marks the document
-    saved only when this returns.
+    The document is first checked as ``load`` would read it back, so a file
+    that would not reopen is never written: FormatError lists the problems.
+    Symlinks are resolved so the link survives.  A stale ``.<name>.tmp``
+    beside the target is removed, then the text goes to a new one, created
+    with the target's mode when the target exists, flushed, fsynced and moved
+    over the target with ``os.replace``; the directory is fsynced last.  On
+    failure the target is untouched and the temporary file removed.  The
+    caller marks the document saved only when this returns.
     """
+    data = document_to_dict(document)
+    document_from_dict(data, os.fspath(path))
+    text = dumps(data)
     target = Path(os.path.realpath(path))
-    text = dumps(document_to_dict(document))
     tmp = target.with_name(".%s.tmp" % target.name)
     try:
         mode: int | None = target.stat().st_mode & 0o7777
     except FileNotFoundError:
         mode = None
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        os.unlink(tmp)
+    except FileNotFoundError:
+        pass
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
     fd = os.open(tmp, flags, 0o666)
     try:
-        if mode is not None:
-            os.fchmod(fd, mode)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
+            if mode is not None:
+                os.fchmod(f.fileno(), mode)
             f.write(text)
             f.flush()
             os.fsync(f.fileno())
@@ -167,8 +179,25 @@ def _fsync_dir(directory: Path) -> None:
 # Reading
 # ---------------------------------------------------------------------------
 
-def _is_number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+def is_number(value: Any) -> bool:
+    """A finite int or float (not a bool) no larger in size than MAX_MAGNITUDE."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    if isinstance(value, float) and not math.isfinite(value):
+        return False
+    return abs(value) <= MAX_MAGNITUDE
+
+
+def is_whole(value: Any) -> bool:
+    """An int (not a bool) no larger in size than MAX_MAGNITUDE."""
+    return isinstance(value, int) and not isinstance(value, bool) and abs(value) <= MAX_MAGNITUDE
+
+
+def _out_of_range(value: Any) -> bool:
+    """A number too large in size to use, which deserves its own message."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return not (isinstance(value, float) and not math.isfinite(value)) and abs(value) > MAX_MAGNITUDE
 
 
 def _describe(value: Any) -> str:
@@ -184,8 +213,10 @@ def _number_problem(field: FieldSpec, key: str, value: Any, default: Any) -> str
     """Why a value is not a number, an allowed expression or an allowed None."""
     if value is None:
         return None if default is None else "%s needs a value" % key
-    if _is_number(value):
+    if is_number(value):
         return None
+    if _out_of_range(value):
+        return "%s is out of range" % key
     if isinstance(value, str) and field.expr_allowed:
         return None
     wanted = "a number or an expression" if field.expr_allowed else "a number"
@@ -209,7 +240,7 @@ def param_problems(field: FieldSpec, params: Mapping[str, Any]) -> list[str]:
             if problem:
                 out.append(problem)
         monitor = params[monitor_key]
-        if monitor is not None and (isinstance(monitor, bool) or not isinstance(monitor, int)):
+        if monitor is not None and not is_whole(monitor):
             out.append("%s must be a whole number or null, not %s" % (monitor_key, _describe(monitor)))
     elif kind == FieldKind.CHOICE:
         value = params[field.key]
@@ -253,7 +284,7 @@ def _event_from_dict(data: Any, first: bool, problems: list[str]) -> MacroEvent 
         if key in data:
             params[key] = freeze_value(data[key])
     dt = data.get("dt", 0.0)
-    if not _is_number(dt) or dt < 0:
+    if not is_number(dt) or dt < 0:
         problems.append("%s dt must be a non-negative number, not %s" % (type_, _describe(dt)))
     elif first and dt != 0:
         problems.append("%s dt must be 0 for a row's first event" % type_)
@@ -278,7 +309,7 @@ def _row_from_dict(data: Any, problems: list[str]) -> Row | None:
     for key, default in _ROW_DEFAULTS.items():
         value = data.get(key, default)
         if key == "delay_ms":
-            ok = isinstance(value, int) and not isinstance(value, bool) and value >= 0
+            ok = is_whole(value) and value >= 0
             wanted = "a whole number of ms, 0 or more"
         else:
             ok = type(value) is type(default)

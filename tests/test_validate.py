@@ -103,9 +103,20 @@ def test_repeat_target_must_be_at_or_above():
             make_row(make("repeat", target=None)),
             make_row(make("beep"), label="below"))
     p = check(d)
-    assert [x.row_index for x in p] == [4, 5]
+    assert [x.row_index for x in p] == [4, 5, 6]
     assert found(p, 4, "target", "label 'below' is below this row")
     assert found(p, 5, "target", "label 'End' is below this row")
+    assert found(p, 6, "target", "choose a label")
+
+
+def test_huge_integers_are_reported_not_raised():
+    d = doc(row("wait", duration_ms=10 ** 400),
+            row("mouse_click", x=10 ** 400, y=1),
+            make_row(make("beep"), delay_ms=10 ** 400))
+    p = check(d)
+    assert found(p, 0, "duration_ms", "Duration_ms is out of range")
+    assert found(p, 1, "x", "X is out of range")
+    assert found(p, 2, "delay_ms", "whole number")
 
 
 # ------------------------------------------------------------- expressions

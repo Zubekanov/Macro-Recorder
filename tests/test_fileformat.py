@@ -10,7 +10,7 @@ from typing import Any, Iterator
 
 import pytest
 
-from macro_recorder.model import catalogue, fileformat
+from macro_recorder.model import catalogue, fileformat, validate
 from macro_recorder.model.catalogue import FieldKind, FieldSpec, make
 from macro_recorder.model.document import MacroDocument, Row, make_row
 from macro_recorder.model.fileformat import FormatError, load, save
@@ -214,6 +214,30 @@ def test_design_example_loads(tmp_path):
     assert doc.rows[2].event["target"] == "start" and not doc.rows[2].enabled
     assert doc.rows[3].is_path and doc.rows[3].events[1].dt == 0.012
     assert doc.rows[1].event["hold_ms"] == 50       # defaults filled in
+    # The example's label clashes with the reserved Start target, which is
+    # reserved in any case; this records the conflict until DESIGN or the
+    # label rule changes.
+    assert [str(p) for p in validate.check(doc)] == ["Row 1: 'start' is reserved"]
+
+
+@pytest.mark.parametrize("event, row_extra, fragment", [
+    ({"type": "wait", "duration_ms": 10 ** 400}, {}, "duration_ms is out of range"),
+    ({"type": "wait", "duration_ms": -(2 ** 60)}, {}, "duration_ms is out of range"),
+    ({"type": "mouse_move", "x": 1, "y": 2}, {"delay_ms": 10 ** 400}, "delay_ms must be"),
+])
+def test_huge_integers_are_reported(tmp_path, event, row_extra, fragment):
+    text = '{"version": 3, "rows": [%s]}' % json.dumps({**row_extra, "events": [event]})
+    with pytest.raises(FormatError) as info:
+        load(write_json(tmp_path, text))
+    assert any(p.startswith("Row 1: ") and fragment in p for p in info.value.problems)
+
+
+def test_huge_dt_is_reported(tmp_path):
+    events = [{"type": "mouse_move", "x": 1, "y": 2},
+              {"type": "mouse_move", "x": 3, "y": 4, "dt": 10 ** 400}]
+    with pytest.raises(FormatError) as info:
+        load(write_json(tmp_path, json.dumps(doc_with([{"events": events}]))))
+    assert any("dt must be a non-negative number" in p for p in info.value.problems)
 
 
 def test_empty_document_round_trips(tmp_path):
@@ -408,6 +432,46 @@ def test_save_through_a_symlink_replaces_the_real_file(tmp_path):
     assert load(real).rows[0].event["duration_ms"] == 2
     assert sorted(p.name for p in real_dir.iterdir()) == ["macro.json"]
     assert sorted(p.name for p in tmp_path.iterdir()) == ["link.json", "real"]
+
+
+@pytest.mark.parametrize("row", [
+    make_row(make("beep"), delay_ms=1.5),
+    make_row(make("wait", duration_ms=True)),
+    make_row(make("wait", duration_ms=10 ** 400)),
+])
+def test_save_refuses_what_load_would_reject(tmp_path, row):
+    target = tmp_path / "m.json"
+    save(_doc(1), target)
+    original = target.read_bytes()
+    with pytest.raises(FormatError) as info:
+        save(MacroDocument([row]), target)
+    assert info.value.problems and info.value.problems[0].startswith("Row 1: ")
+    assert target.read_bytes() == original
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["m.json"]
+
+
+def test_failure_after_open_closes_the_temp_file(tmp_path, monkeypatch):
+    target = tmp_path / "m.json"
+    save(_doc(1), target)
+    before = len(os.listdir("/proc/self/fd"))
+
+    def broken_fchmod(fd, mode):
+        raise OSError("read-only")
+    monkeypatch.setattr(fileformat.os, "fchmod", broken_fchmod)
+    with pytest.raises(OSError, match="read-only"):
+        save(_doc(2), target)
+    assert len(os.listdir("/proc/self/fd")) == before
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["m.json"]
+
+
+def test_stale_temp_symlink_is_replaced_not_followed(tmp_path):
+    elsewhere = tmp_path / "elsewhere.txt"
+    elsewhere.write_text("keep")
+    (tmp_path / ".m.json.tmp").symlink_to(elsewhere)
+    save(_doc(4), tmp_path / "m.json")
+    assert load(tmp_path / "m.json").rows[0].event["duration_ms"] == 4
+    assert elsewhere.read_text() == "keep"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["elsewhere.txt", "m.json"]
 
 
 def test_stale_temp_file_is_overwritten(tmp_path):

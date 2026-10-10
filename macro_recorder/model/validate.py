@@ -9,7 +9,6 @@ marks the rows.  Warnings do not stop playback.
 
 from __future__ import annotations
 
-import math
 import os
 from dataclasses import dataclass
 from typing import Any, Iterator, Literal, Mapping
@@ -20,7 +19,7 @@ from macro_recorder.model.actions.variables import DYNAMIC_VALUES
 from macro_recorder.model.catalogue import RESERVED_TARGETS, FieldKind, FieldSpec, spec
 from macro_recorder.model.document import MacroDocument, Row, label_problem
 from macro_recorder.model.events import EVENT_TYPE_VALUES, EventType, MacroEvent
-from macro_recorder.model.fileformat import param_problems
+from macro_recorder.model.fileformat import is_number, is_whole, param_problems
 from macro_recorder.model.keys import parse_combo
 
 Severity = Literal["error", "warning"]
@@ -102,7 +101,7 @@ class _Checker:
             if not row.enabled:
                 yield ("label", "Label %r is on a disabled row; jumps to it continue at the next "
                        "row that plays" % row.label, "warning")
-        if isinstance(row.delay_ms, bool) or not isinstance(row.delay_ms, int) or row.delay_ms < 0:
+        if not is_whole(row.delay_ms) or row.delay_ms < 0:
             yield "delay_ms", "Delay must be a whole number of ms, 0 or more", "error"
         if row.events[0].type not in EVENT_TYPE_VALUES:
             yield None, "Unknown action type %r" % row.events[0].type, "error"
@@ -115,9 +114,9 @@ class _Checker:
     def _path(self, row: Row) -> Iterator[tuple[str | None, str, Severity]]:
         for number, event in enumerate(row.events, 1):
             for key in ("x", "y"):
-                if not _is_number(event.params.get(key)):
+                if not is_number(event.params.get(key)):
                     yield key, "Path point %d: %s must be a number" % (number, key), "error"
-            if not _is_number(event.dt) or event.dt < 0 or (number == 1 and event.dt != 0):
+            if not is_number(event.dt) or event.dt < 0 or (number == 1 and event.dt != 0):
                 yield None, "Path point %d has a bad time offset %r" % (number, event.dt), "error"
 
     def _event(self, index: int, event: MacroEvent) -> Iterator[tuple[str | None, str, Severity]]:
@@ -237,7 +236,7 @@ class _Checker:
             return
         value = event.params[field.key]
         if value is None or value == "":
-            if field.none_label is None and field.default is not None:
+            if field.none_label is None:
                 yield field.key, "%s: choose a label" % field.label, "error"
             return
         lower = value.lower()
@@ -270,10 +269,6 @@ class _Checker:
             return
         if single and len(names) != 1:
             yield key, "%r is a combination; this field takes one key" % value, "error"
-
-
-def _is_number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
 def _nonzero(value: Any) -> bool:
