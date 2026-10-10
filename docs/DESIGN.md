@@ -103,9 +103,11 @@ class Row:
   undo step. Clearing a label that rows jump to is refused (`replace_row`
   and `rename_label` raise ValueError naming those rows; `rename_problem`
   gives the same text for live validation). Paste renames a label that
-  already exists to the first free `<label> 2`, `<label> 3`... and
-  retargets the pasted rows that jump to it, clears an invalid label, and
-  logs either.
+  already exists to the first free `<base> 2`, `<base> 3`..., where the
+  base is the label without a trailing ` N` ("Loop 2" pasted again becomes
+  "Loop 3") and a name the pasted rows use as a label or a target is not
+  free, and retargets the pasted rows that jump to it, clears an invalid
+  label, and logs either.
 - `MacroDocument` holds `rows: tuple[Row, ...]`, `filter`, `path_mode`, a
   revision counter and `saved_revision` (dirty means they differ), and the
   undo stack. Operations: `insert(index, rows)`, `delete(ids)`,
@@ -393,9 +395,10 @@ uses `zenity` when present and otherwise answers the first button and logs it.
   sticky, then `_NET_ACTIVE_WINDOW` with source indication 2 and the server
   time (from a PropertyNotify on the manager's own window). Then poll
   `_NET_ACTIVE_WINDOW` and the geometry every 50 ms until two reads agree
-  or `window_settle_ms` (1000) passes. A dialog whose `WM_TRANSIENT_FOR`
-  chain leads to the window counts as the window being active (Muffin
-  focuses a window's modal dialog instead). Failure counts as missing.
+  or `window_settle_ms` (1000) passes. A dialog whose `_NET_WM_STATE` holds
+  `_NET_WM_STATE_MODAL` and whose `WM_TRANSIENT_FOR` chain leads to the
+  window counts as the window being active (Muffin focuses a window's modal
+  dialog instead). Failure counts as missing.
 - Restore: when the recorded state was maximised the engine sets that state
   and does not move. Otherwise, when `restore_rect` resolves to yes and the
   recorded outer rect lies inside a current monitor's work area, it sends
@@ -436,7 +439,7 @@ from the active-window watcher.
 | Concern | Implementation |
 |---|---|
 | Session | `session.check()` refuses recording and playback when `XDG_SESSION_TYPE` is `wayland`, `WAYLAND_DISPLAY` is set, or `DISPLAY` is unset. The GUI shows a dialog and disables Record and Play; the CLI exits 3 (2 is argparse's usage error). |
-| Keys | The model stores X keysym names (`a`, `KP_1`, `Return`, `Control_L`, `F6`). Combos are `ctrl+shift+s` with aliases `ctrl`, `shift`, `alt`, `super` and are shown as `Ctrl+Shift+S` (a Details key field shows the stored form when the shown form would parse back to a different value, such as `ctrl+S`; letters in a typed combination are stored in lower case). A lone `+` and a trailing `++` (`ctrl++`) are the plus key; a single trailing `+` (`ctrl+`) leaves the key out and is an error. `input.py` looks a name up in the active XKB group under the live lock state (`KeyboardMap.find_for_state`), borrowing a spare keycode for keysyms the group lacks and restoring it 150 ms after the last key event when playback ends (a borrow that another client's keymap reload overwrote is mapped afresh). `press_key` adds Shift only for a keypad keysym or an upper-case letter the live Num Lock or Caps Lock state would otherwise turn into the other level; Caps Lock adds Shift in `type_char` only on a key whose two levels are a lower and upper case pair. A `live_x` test resolves every name in the table. |
+| Keys | The model stores X keysym names (`a`, `KP_1`, `Return`, `Control_L`, `F6`). Combos are `ctrl+shift+s` with aliases `ctrl`, `shift`, `alt`, `super` and are shown as `Ctrl+Shift+S` (a Details key field shows the stored form when the shown form would parse back to a different value, such as `ctrl+S`; letters in a typed combination are stored in lower case). A lone `+` and a trailing `++` (`ctrl++`) are the plus key; a single trailing `+` (`ctrl+`) leaves the key out and is an error. `input.py` looks a name up in the active XKB group under the live lock state (`KeyboardMap.find_for_state`), borrowing a spare keycode for keysyms the group lacks and restoring it 150 ms after the last key event when playback ends (a borrow that another client's keymap reload overwrote is mapped afresh). `press_key` adds Shift only for a keypad keysym or an upper-case letter the live Num Lock or Caps Lock state would otherwise turn into the other level, and holds it until that key is released (or `release_all`), so autorepeat keeps the level; Caps Lock adds Shift in `type_char` only on a key whose two levels are a lower and upper case pair. A `live_x` test resolves every name in the table. |
 | Injection | XTest only, through `InputBackend`: `move(x, y)`, `press_button`, `release_button`, `scroll(dx, dy)`, `press_key(name)`, `release_key(name)`, `type_text(text)`. The backend counts every synthetic key it sends, by keycode, for the stop-key fallback. |
 | Recording stream | `InputListener` on XRecord with its own two connections (one blocks in the record context, one controls it): KeyPress and KeyRelease with keycode and state mapped to a keysym name, ButtonPress, ButtonRelease and MotionNotify with root coordinates. |
 | Stop key | `StopKeyWatcher` selects `XI_RawKeyPress` on the root through XInput2 (python-xlib provides the masks; `x11.py` registers a raw event decoder with `ge_add_event_data`) and ignores events whose `sourceid` is the `Virtual core XTEST keyboard` slave. Synthetic Esc, including autorepeat of a held synthetic Esc, never counts as the user. Where XInput2 2.1 is unavailable the fallback uses XRecord and the injector's counter, ignoring Esc while the injector holds it. |
@@ -556,8 +559,9 @@ from the active-window watcher.
 (the Value text per row, with row numbers and labels, typed newlines and
 tabs escaped so each row is one line), `validate FILE` (exit 1 with one line
 per problem). `list` and `validate` need no display. Execution errors print
-"Error: Row N: message" and exit 1. Ctrl+C, or Esc unless `--repeat 0`,
-prints "Stopped" and exits 130; no X11 session exits 3; output closed early
+"Error: Row N: message" and exit 1. Ctrl+C prints "Stopped" and exits 130.
+Esc prints "Stopped" and exits 0 under `--repeat 0`, where it is the normal
+way to end, and 130 otherwise. No X11 session exits 3; output closed early
 exits 141 without a traceback.
 
 ## Tests

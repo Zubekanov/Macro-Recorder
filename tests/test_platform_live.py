@@ -118,6 +118,12 @@ def test_transient_chain_and_work_area_properties(probe, tk, display):
     child = x11.tk_toplevel_xid(display, dialog.winfo_id())
     assert x11.transient_reaches(display, child, parent)
     assert not x11.transient_reaches(display, parent, child)
+    assert not x11.is_modal(display, child)
+    state = x11.atom(display, "_NET_WM_STATE")
+    x11.window(display, child).change_property(
+        state, Xatom.ATOM, 32, [x11.atom(display, "_NET_WM_STATE_MODAL")])
+    display.sync()
+    assert x11.is_modal(display, child)
     root = display.screen().root
     name = x11.atom(display, "_GTK_WORKAREAS_D0")
     try:

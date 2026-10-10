@@ -462,6 +462,7 @@ def test_drop_in_the_heading_of_a_scrolled_table_goes_before_the_first_visible_r
     index = {str(r.id): n for n, r in enumerate(w.document.rows)}
     first, last = w.table._visible_rows(index)
     assert index[first] > 0 and index[last] < 79
+    assert not tree.bbox(tree.prev(first)) and not tree.bbox(tree.next(last))
     position, _line = w.table._drop_at(2)                       # in the heading
     assert position == index[first]
     position, _line = w.table._drop_at(tree.winfo_height() + 60)  # well below the table
@@ -598,6 +599,20 @@ def test_hidden_log_follows_new_lines_once_shown():
         assert w.log_panel._text.yview()[0] == 0.0
     finally:
         w.close()
+
+
+@pytest.mark.parametrize("drag", ["<B1-Motion>", "<B2-Motion>"])
+def test_dragging_the_log_away_from_the_end_stops_following(rig, drag):
+    show(rig)
+    panel = rig.window.log_panel
+    panel.append(["line %d" % i for i in range(200)])
+    rig.window.root.update()
+    panel._text.yview_moveto(0)                    # where the drag scrolled to
+    panel._text.event_generate(drag, x=5, y=5)
+    rig.window.root.update()
+    panel.append(["newest"])
+    rig.window.root.update()
+    assert panel._text.yview()[1] < 1.0
 
 
 def test_f8_toggles_the_breakpoint_while_paused(rig):

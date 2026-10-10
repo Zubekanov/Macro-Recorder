@@ -213,12 +213,13 @@ class X11WindowManager:
         return self._call(lambda d: x11.read_window(d, window.id, require_title=False), None)
 
     def _snapshot(self, xid: int) -> tuple[int | None, WindowInfo | None]:
-        """``(focus, info)``: ``focus`` is ``xid`` when the window or a dialog
-        transient for it is active, else the active id."""
+        """``(focus, info)``: ``focus`` is ``xid`` when the window or a modal
+        dialog transient for it is active, else the active id."""
         def read(d):
             active = x11.active_window_id(d)
-            if active is not None and active != xid and x11.transient_reaches(d, active, xid):
-                log.debug("Activating %#x focused its dialog %#x", xid, active)
+            if (active is not None and active != xid and x11.is_modal(d, active)
+                    and x11.transient_reaches(d, active, xid)):
+                log.debug("Activating %#x focused its modal dialog %#x", xid, active)
                 active = xid
             return active, x11.read_window(d, xid, require_title=False)
         return self._call(read, (None, None))

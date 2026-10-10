@@ -542,18 +542,20 @@ class ActionTable(ttk.Frame):
         return position, first_box[1] if above else last_box[1] + last_box[3]
 
     def _visible_rows(self, index: dict[str, int]) -> tuple[str | None, str | None]:
-        """The first and last document rows with a visible bounding box."""
-        height = self.tree.winfo_height()
+        """The first and last document rows with a visible bounding box.
+
+        Visible rows are consecutive, so the walk stops at the first row
+        without a box after a visible one.
+        """
         first = last = None
-        for y in range(0, height, 2):
-            iid = self.tree.identify_row(y)
-            if iid in index and self.tree.bbox(iid):
-                first = iid
-                break
-        for y in range(height - 1, -1, -2):
-            iid = self.tree.identify_row(y)
-            if iid in index and self.tree.bbox(iid):
+        for iid in self.tree.get_children():
+            if iid not in index:
+                continue
+            if self.tree.bbox(iid):
+                if first is None:
+                    first = iid
                 last = iid
+            elif first is not None:
                 break
         return first, last
 

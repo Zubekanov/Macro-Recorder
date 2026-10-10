@@ -31,9 +31,14 @@ echo "==> Syncing the Python environment"
 echo "==> Adding the applications-menu launcher"
 APPS_DIR="$HOME/.local/share/applications"
 mkdir -p "$APPS_DIR"
-"$REPO/scripts/desktop-entry.sh" "$REPO/packaging/macro-recorder.desktop" "$UV" "$REPO" \
-    > "$APPS_DIR/macro-recorder.desktop"
-chmod +x "$APPS_DIR/macro-recorder.desktop"
+ENTRY="$APPS_DIR/macro-recorder.desktop"
+# Written beside the target and moved into place, so a failure leaves no empty entry.
+ENTRY_TMP="$(mktemp "$APPS_DIR/.macro-recorder.desktop.XXXXXX")"
+trap 'rm -f "$ENTRY_TMP"' EXIT
+bash "$REPO/scripts/desktop-entry.sh" "$REPO/packaging/macro-recorder.desktop" "$UV" "$REPO" \
+    > "$ENTRY_TMP"
+chmod 755 "$ENTRY_TMP"
+mv -f "$ENTRY_TMP" "$ENTRY"
 command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$APPS_DIR" || true
 
 if [ "${XDG_SESSION_TYPE:-}" = "wayland" ]; then
@@ -44,7 +49,7 @@ fi
 
 echo
 # This shell's PATH may not hold a freshly installed uv, so name it in full.
-echo "Done. Start it from the menu, or with:  cd '$REPO' && '$UV' run macro-recorder"
+printf 'Done. Start it from the menu, or with:  cd %q && %q run macro-recorder\n' "$REPO" "$UV"
 if [ "$INSTALLED_UV" = 1 ]; then
     echo "(uv was just installed: open a new terminal to have 'uv' on your PATH.)"
 fi

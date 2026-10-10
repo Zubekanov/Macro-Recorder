@@ -14,7 +14,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Iterable, Mapping, Sequence
 
 from macro_recorder.model.catalogue import (
-    END_TARGET, FILTER_GROUPS, RESERVED_TARGETS, START_TARGET, spec,
+    END_TARGET, FILTER_GROUPS, RESERVED_TARGETS, START_TARGET, FieldKind, spec,
 )
 from macro_recorder.model.events import EventType, MacroEvent
 from macro_recorder.model.protocols import Change, ChangeListener
@@ -74,6 +74,7 @@ def make_row(events: MacroEvent | Sequence[MacroEvent], **fields: Any) -> Row:
 
 # Labels: letters, digits, underscore, space and hyphen; no leading digit.
 _LABEL_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_ \-]*$")
+_NUMBERED = re.compile(r"(?<=\S) \d+$")       # the " 2" of "Loop 2"
 
 
 def label_problem(label: str, document: "MacroDocument | None" = None,
@@ -209,14 +210,18 @@ class MacroDocument:
     def insert(self, index: int, rows: Sequence[Row]) -> tuple[int, ...]:
         """Insert rows with fresh ids.  Returns the new ids.
 
-        An invalid label is cleared.  A label already in use is renamed to the
-        first free ``"<label> 2"``, ``"<label> 3"``..., and the inserted rows
-        that jump to it are retargeted, so a pasted block keeps jumping inside
-        itself rather than into the original.
+        An invalid label is cleared.  A label already in use loses any
+        trailing ``" N"`` and is renamed to the first free ``"<base> 2"``,
+        ``"<base> 3"``... that no inserted row uses as a label or a target,
+        and the inserted rows that jump to it are retargeted, so a pasted
+        block keeps jumping inside itself rather than into the original.
         """
         if not rows:
             return ()
         used = {r.label.lower() for r in self._rows if r.label}
+        own = {r.label.lower() for r in rows if r.label}
+        avoid = used | own | {value.lower() for r in rows for key in target_keys(r)
+                              if isinstance(value := r.event.get(key), str)}
         renames: dict[str, str] = {}
         labelled = []
         for r in rows:
@@ -224,11 +229,13 @@ class MacroDocument:
             if label and label_problem(label) is not None:
                 label = ""
             elif label and label.lower() in used:
+                base = _NUMBERED.sub("", label)
                 n = 2
-                while ("%s %d" % (label, n)).lower() in used:
+                while ("%s %d" % (base, n)).lower() in avoid:
                     n += 1
-                renames[label.lower()] = "%s %d" % (label, n)
-                label = "%s %d" % (label, n)
+                renames[label.lower()] = "%s %d" % (base, n)
+                label = "%s %d" % (base, n)
+                avoid.add(label.lower())
             if label:
                 used.add(label.lower())
             labelled.append(replace(r, label=label))
@@ -479,7 +486,6 @@ class MacroDocument:
 
 def target_keys(row: Row) -> tuple[str, ...]:
     """The LABEL_TARGET keys of the row's spec."""
-    from macro_recorder.model.catalogue import FieldKind
     return tuple(k for f in spec(row.type).fields if f.kind == FieldKind.LABEL_TARGET for k in f.keys)
 
 
@@ -507,7 +513,6 @@ def rows_referencing(rows: Sequence[Row], label: str) -> list[Row]:
     A target hidden by its field's ``visible_when`` (a pixel wait's Go to
     while On timeout is Abort, say) is ignored, as validation ignores it.
     """
-    from macro_recorder.model.catalogue import FieldKind
     out = []
     for r in rows:
         params = r.event.params

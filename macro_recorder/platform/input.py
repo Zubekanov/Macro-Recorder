@@ -181,7 +181,8 @@ class XTestInput:
     ``press_key`` presses the keycode that carries the keysym and adds no
     modifiers, except Shift for a keypad keysym or an upper-case letter that
     the live Num Lock or Caps Lock state would otherwise turn into the other
-    level; ``type_char`` adds Shift or Level 3 as the keymap and the lock
+    level, held until ``release_key`` of that name or :meth:`release_all`;
+    ``type_char`` adds Shift or Level 3 as the keymap and the lock
     state need.  Keysyms the active group lacks are typed on a borrowed spare
     keycode, restored by :meth:`release_all`.  Every synthetic key press is
     noted in ``synthetic`` for the stop-key fallback.
@@ -199,7 +200,8 @@ class XTestInput:
         self._borrower = x11.KeycodeBorrower(self._d, self._kmap)
         self._held_keys: list[int] = []
         self._held_buttons: list[int] = []
-        self._pressed_names: dict[str, int] = {}    # key name -> keycode press_key used
+        # key name -> (keycode press_key used, the Shift it added or None)
+        self._pressed_names: dict[str, tuple[int, int | None]] = {}
 
     # -- keymap -------------------------------------------------------------
 
@@ -315,19 +317,19 @@ class XTestInput:
             if shift is not None:
                 self._key(shift, True)
             self._key(keycode, True)
-            if shift is not None:
-                # The press already carried Shift; letting go now keeps it
-                # from changing anything else typed while the key is held.
-                self._key(shift, False)
-            self._pressed_names[normalise_key(name)] = keycode
+            # The added Shift stays down until the key is released, so an
+            # autorepeat of the held key keeps the level it was pressed at.
+            self._pressed_names[normalise_key(name)] = (keycode, shift)
 
     def release_key(self, name: str) -> None:
         with self._lock:
-            keycode = self._pressed_names.pop(normalise_key(name), None)
+            keycode, shift = self._pressed_names.pop(normalise_key(name), (None, None))
         if keycode is None:
             keycode = self.keycode_for(name)
         with self._lock:
             self._key(keycode, False)
+            if shift is not None:
+                self._key(shift, False)
 
     def type_char(self, char: str) -> None:
         """Press and release whatever produces ``char``, with Shift or Level 3 as needed.

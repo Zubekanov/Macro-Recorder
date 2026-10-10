@@ -173,8 +173,26 @@ def test_pasted_labels_are_renamed_all_at_once():
     doc.append([wait(1, label="A")])
     ids = doc.append([wait(2, label="A"), wait(3, label="A 2"), goto("A"), goto("A 2")])
     rows = [doc.row(i) for i in ids]
-    assert [r.label for r in rows[:2]] == ["A 2", "A 2 2"]
-    assert rows[2].event["target"] == "A 2" and rows[3].event["target"] == "A 2 2"
+    assert [r.label for r in rows[:2]] == ["A 3", "A 2"]     # "A 2" is the batch's own
+    assert rows[2].event["target"] == "A 3" and rows[3].event["target"] == "A 2"
+
+
+def test_pasting_a_numbered_label_again_counts_on_from_its_base():
+    doc = MacroDocument()
+    doc.append([wait(1, label="Loop")])
+    (second,) = doc.append([wait(2, label="Loop")])
+    assert doc.row(second).label == "Loop 2"
+    (third,) = doc.append([doc.row(second)])
+    assert doc.row(third).label == "Loop 3"
+
+
+def test_paste_rename_skips_names_the_batch_jumps_to_outside_itself():
+    doc = MacroDocument()
+    doc.append([wait(1, label="Loop")])
+    ids = doc.append([wait(2, label="Loop"), goto("Loop 2")])     # "Loop 2" is not in the batch
+    rows = [doc.row(i) for i in ids]
+    assert rows[0].label == "Loop 3"
+    assert rows[1].event["target"] == "Loop 2"
 
 
 def test_rename_label_retargets_the_renamed_row_itself():

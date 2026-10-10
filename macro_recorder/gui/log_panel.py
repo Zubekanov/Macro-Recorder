@@ -33,7 +33,9 @@ class LogPanel(ttk.Notebook):
         self._follow = True
         scroll = ttk.Scrollbar(self._log_frame, orient="vertical", command=self._scroll)
         self._text.configure(yscrollcommand=scroll.set)
-        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+        # The class bindings scroll after these run, so read the view after idle.
+        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>",
+                         "<B1-Motion>", "<B2-Motion>"):
             self._text.bind(sequence, lambda e: self.after_idle(self._update_follow), add="+")
         self._text.bind("<Configure>", lambda e: self._follow and self._text.see("end"), add="+")
         clear = ttk.Button(self._log_frame, text="Clear", command=self.clear)

@@ -10,6 +10,9 @@ window when it moves.
 
 ## Install on Linux Mint
 
+Get the repository with `git clone https://github.com/Zubekanov/Macro-Recorder.git`
+(or download it as a zip from that page and unpack it), then run from its folder:
+
 ```
 ./scripts/install-mint.sh
 ```
@@ -61,7 +64,8 @@ uv run macro-recorder-cli validate out.json
 display. Run `uv run macro-recorder-cli COMMAND --help` for details.
 
 Exit status: 0 done, 1 an error, 2 a bad command line, 3 no X11 session,
-130 stopped by Ctrl+C or Esc (Esc under `--repeat 0` exits 0).
+130 stopped by Ctrl+C or Esc (Esc under `--repeat 0` exits 0), 141 output
+closed early (for example piped into `head`).
 
 Settings live in `$XDG_CONFIG_HOME/macro-recorder/settings.json` and the log
 in `$XDG_CACHE_HOME/macro-recorder/app.log`.

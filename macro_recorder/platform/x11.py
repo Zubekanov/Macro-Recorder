@@ -322,6 +322,17 @@ def active_window_id(d) -> int | None:
     return toplevel_of(d, xid)
 
 
+def is_modal(d, xid: int) -> bool:
+    """True when the window's _NET_WM_STATE holds _NET_WM_STATE_MODAL."""
+    from Xlib.error import BadWindow
+
+    try:
+        state = prop_ints(d, window(d, xid), "_NET_WM_STATE") or ()
+    except BadWindow:
+        return False
+    return atom(d, "_NET_WM_STATE_MODAL") in state
+
+
 def transient_reaches(d, xid: int, target: int, max_depth: int = 8) -> bool:
     """True when ``xid``'s WM_TRANSIENT_FOR chain leads to ``target``.
 

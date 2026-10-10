@@ -233,11 +233,11 @@ def test_caps_lock_adds_shift_only_to_a_case_pair(displays, monkeypatch):
 
 
 @pytest.mark.parametrize("name, state, expected", [
-    ("KP_1", 0, [(SHIFT, True), (87, True), (SHIFT, False)]),      # Num Lock off: Shift picks KP_1
+    ("KP_1", 0, [(SHIFT, True), (87, True)]),      # Num Lock off: Shift picks KP_1
     ("KP_1", NUM_LOCK, [(87, True)]),
-    ("KP_End", NUM_LOCK, [(SHIFT, True), (87, True), (SHIFT, False)]),
+    ("KP_End", NUM_LOCK, [(SHIFT, True), (87, True)]),
     ("KP_End", 0, [(87, True)]),
-    ("A", 0, [(SHIFT, True), (38, True), (SHIFT, False)]),        # recorded with Caps Lock on
+    ("A", 0, [(SHIFT, True), (38, True)]),        # recorded with Caps Lock on
     ("A", X.LockMask, [(38, True)]),
     ("a", X.LockMask, [(38, True)]),                # combos name physical keys: no Shift
     ("exclam", 0, [(10, True)]),                    # other keysyms stay bare, as recorded
@@ -248,8 +248,25 @@ def test_press_key_matches_the_live_lock_state(injector, displays, name, state, 
     assert injector.keys == expected
     displays[0].pointer.mask = 0
     injector.release_key(name)
-    (keycode,) = [k for k, _ in expected if k != SHIFT]
-    assert injector.keys[-1] == (keycode, False)    # the keycode that was pressed
+    # The keycode that was pressed, then any Shift that press added.
+    assert injector.keys[len(expected):] == [(k, False) for k, _ in reversed(expected)]
+
+
+@pytest.mark.parametrize("name", ["KP_1", "A"])
+def test_added_shift_is_held_until_the_key_is_released(injector, name):
+    injector.press_key(name)
+    assert injector.keys[-1][1] and (SHIFT, False) not in injector.keys
+    injector.release_key(name)
+    assert injector.keys[-1] == (SHIFT, False)
+
+
+def test_release_all_lets_go_of_an_added_shift(injector):
+    injector.press_key("KP_1")
+    injector.release_all()
+    assert injector.keys[2:] == [(87, False), (SHIFT, False)]
+    injector.keys.clear()
+    injector.release_key("KP_1")                    # forgotten: no Shift released again
+    assert injector.keys == [(87, False)]
 
 
 def test_press_key_keeps_a_held_shift_and_releases_the_pressed_keycode(injector, displays):
@@ -574,7 +591,9 @@ class FakeDesktop:
         monkeypatch.setattr(x11, "active_window_id", lambda d: self._tick() or self.active)
         monkeypatch.setattr(x11, "read_window", self._read)
         self.transient_for: dict[int, int] = {}         # dialog -> parent
+        self.modal: set[int] = set()
         monkeypatch.setattr(x11, "transient_reaches", self._reaches)
+        monkeypatch.setattr(x11, "is_modal", lambda d, xid: xid in self.modal)
 
     def _reaches(self, d, xid, target):
         while xid in self.transient_for:
@@ -645,10 +664,19 @@ def test_activate_gives_up_when_the_window_manager_refuses(desk, wm, monkeypatch
 def test_activate_succeeds_when_the_window_manager_focuses_its_modal_dialog(desk, wm, monkeypatch):
     desk.windows[3] = desk._info(3, Rect(80, 80, 200, 100), desktop=1)
     desk.transient_for[3] = 2
+    desk.modal.add(3)
     monkeypatch.setattr(x11, "activate", lambda d, xid, desktop, t: desk._later(
         lambda: setattr(desk, "active", 3)))
     info = wm.activate(desk.windows[2], settle_ms=1000)
     assert info == desk.windows[2] and desk.active == 3
+
+
+def test_activate_fails_when_a_non_modal_transient_is_active(desk, wm, monkeypatch):
+    desk.windows[3] = desk._info(3, Rect(80, 80, 200, 100), desktop=1)
+    desk.transient_for[3] = 2
+    monkeypatch.setattr(x11, "activate", lambda d, xid, desktop, t: desk._later(
+        lambda: setattr(desk, "active", 3)))
+    assert wm.activate(desk.windows[2], settle_ms=300) is None
 
 
 def test_activate_of_a_vanished_window_returns_none(desk, wm):
