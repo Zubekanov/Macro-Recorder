@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
+import sys
 import threading
 import time
 
@@ -31,6 +33,7 @@ def x11_session(monkeypatch):
     monkeypatch.setenv("DISPLAY", ":99")
     monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
     monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.delenv("WINDOWID", raising=False)
 
 
 class Platform:
@@ -92,6 +95,8 @@ def test_parser_play_defaults_keep_default_settings():
     ["play", "m.json", "--repeat", "-1"],
     ["play", "m.json", "--on-missing", "goto"],
     ["record", "--stop-key", "ctrl+F6"],
+    ["record", "--stop-key", "ctrl"],
+    ["record", "--stop-key", "Shift_R"],
     ["frobnicate"],
     [],
 ])
@@ -112,33 +117,50 @@ def test_parser_record_stop_key_is_normalised():
 # list
 # ---------------------------------------------------------------------------
 
-def test_list_shows_rows_and_groups(tmp_path, capsys, monkeypatch):
-    monkeypatch.delenv("DISPLAY", raising=False)
-    path = save(tmp_path, [
-        make_row(make("wait", duration_ms=200), label="top"),
-        make_row(make("window_focus", window="xed")),
-        make_row(make("mouse_click", x=10, y=20), delay_ms=60, comment="press OK"),
-        make_row(make("key_combo", keys="ctrl+s"), enabled=False),
-        make_row(make("window_focus", window="Firefox"), enabled=False),
-        make_row(make("wait", duration_ms=100)),
-    ])
+LIST_ROWS = [
+    make_row(make("wait", duration_ms=200), label="top"),
+    make_row(make("window_focus", window="xed")),
+    make_row(make("mouse_click", x=10, y=20), delay_ms=60, comment="press OK"),
+    make_row(make("key_combo", keys="ctrl+s"), enabled=False, breakpoint=True),
+    make_row(make("window_focus", window="Firefox"), enabled=False),
+    make_row(make("wait", duration_ms=100), breakpoint=True),
+]
+
+
+def test_list_shows_rows_and_groups(tmp_path, capsys):
+    path = save(tmp_path, LIST_ROWS)
     assert cli.main(["list", path]) == 0
     assert capsys.readouterr().out.splitlines() == [
-        "1              top  Wait: 200 ms",
+        "1               top  Wait: 200 ms",
         "",
-        "2                   Window Focus: xed",
-        "3       60 ms         Mouse Click: left click at (10, 20)  # press OK",
-        "4 ||                  Key: Ctrl+S",
+        "2                    Window Focus: xed",
+        "3        60 ms         Mouse Click: left click at (10, 20)  # press OK",
+        "4 ||*                  Key: Ctrl+S",
         "",
-        "5 ||                Window Focus: Firefox",
-        "6                   Wait: 100 ms",
+        "5 ||                 Window Focus: Firefox",
+        "6   *                Wait: 100 ms",
+    ]
+
+
+def test_list_brackets_filtered_rows(tmp_path, capsys):
+    path = save(tmp_path, LIST_ROWS, filter=("mouse_click",))
+    assert cli.main(["list", path]) == 0
+    assert capsys.readouterr().out.splitlines() == [
+        " 1                top  Wait: 200 ms",
+        "",
+        " 2                     Window Focus: xed",
+        "[3]        60 ms         Mouse Click: left click at (10, 20)  # press OK",
+        " 4  ||*                  Key: Ctrl+S",
+        "",
+        " 5  ||                 Window Focus: Firefox",
+        " 6    *                Wait: 100 ms",
     ]
 
 
 def test_list_without_labels_has_no_label_column(tmp_path, capsys):
     path = save(tmp_path, [make_row(make("wait", duration_ms=200))])
     assert cli.main(["list", path]) == 0
-    assert capsys.readouterr().out == "1              Wait: 200 ms\n"
+    assert capsys.readouterr().out == "1               Wait: 200 ms\n"
 
 
 def test_list_bad_file(tmp_path, capsys):
@@ -189,10 +211,22 @@ def test_validate_structural_problems(tmp_path, capsys):
     assert capsys.readouterr().out == 'Row 1: unknown event type "nope"\n'
 
 
-def test_list_and_validate_do_not_import_the_platform():
-    code = ("import sys; from macro_recorder import cli; "
-            "assert 'Xlib' not in sys.modules and 'macro_recorder.platform.input' not in sys.modules")
-    subprocess.run([__import__("sys").executable, "-c", code], check=True)
+def test_list_and_validate_do_not_import_the_platform(tmp_path):
+    path = save(tmp_path, [make_row(make("window_focus", window="xed")),
+                           make_row(make("mouse_click", x=10, y=20))])
+    code = "\n".join([
+        "import sys",
+        "from macro_recorder import cli",
+        "assert cli.main(['list', sys.argv[1]]) == 0",
+        "assert cli.main(['validate', sys.argv[1]]) == 0",
+        "loaded = {'Xlib', 'macro_recorder.platform.input', 'macro_recorder.platform.windows',",
+        "          'macro_recorder.platform.x11', 'tkinter'} & set(sys.modules)",
+        "assert not loaded, loaded",
+    ])
+    env = {k: v for k, v in os.environ.items() if k not in ("DISPLAY", "WAYLAND_DISPLAY")}
+    subprocess.run([sys.executable, "-c", code, path], check=True, env=env,
+                   cwd=os.path.dirname(os.path.dirname(os.path.abspath(cli.__file__))),
+                   stdout=subprocess.DEVNULL)
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +276,36 @@ def test_play_refuses_invalid_document(tmp_path, capsys, platform):
     assert err[0].startswith("Row 1: ")
     assert err[-1].startswith("Error: ") and "1 problem(s)" in err[-1]
     assert platform.input.actions == []
+
+
+def test_play_ignores_errors_on_rows_that_do_not_play(tmp_path, capsys, platform):
+    path = save(tmp_path, [
+        make_row(make("goto", target="nowhere"), enabled=False),
+        make_row(make("wait", duration_ms=-5)),
+        make_row(make("mouse_click", x=10, y=20)),
+    ], filter=("wait",))
+    assert cli.main(["play", path]) == 0
+    assert ("press_button", "left") in platform.input.actions
+    assert capsys.readouterr().err == ""
+    assert cli.main(["play", path, "--verbose"]) == 0
+    err = capsys.readouterr().err.splitlines()
+    assert err[0].startswith("warning: Row 1: ") and err[0].endswith("(row does not play)")
+    assert err[1].startswith("warning: Row 2: ")
+
+
+def test_play_refuses_errors_on_rows_unfiltered_by_no_filter(tmp_path, capsys, platform):
+    path = save(tmp_path, [make_row(make("wait", duration_ms=-5))], filter=("wait",))
+    assert cli.main(["play", path, "--no-filter"]) == 1
+    assert capsys.readouterr().err.startswith("Row 1: ")
+
+
+def test_play_refuses_label_errors_on_disabled_rows(tmp_path, capsys, platform):
+    path = save(tmp_path, [
+        make_row(make("wait", duration_ms=1), label="again"),
+        make_row(make("wait", duration_ms=1), label="again", enabled=False),
+    ])
+    assert cli.main(["play", path]) == 1
+    assert capsys.readouterr().err.startswith("Row 2: ")
 
 
 def test_play_reports_runtime_error(tmp_path, capsys, platform):
@@ -294,6 +358,34 @@ def test_play_ctrl_c_stops_the_player(tmp_path, capsys, monkeypatch, platform):
     assert platform.input.held_keys == set()
     assert platform.input_closed
     assert "Stopped" in capsys.readouterr().err
+
+
+def test_play_second_ctrl_c_waits_for_the_player(tmp_path, capsys, monkeypatch, platform):
+    path = save(tmp_path, [make_row(make("key_press", key="a")),
+                           make_row(make("wait", duration_ms=60000))])
+    interrupts = [0]
+    closed_while_running = []
+    real_slice = cli._join_slice
+
+    def join_slice(thread):
+        if interrupts[0] < 2:
+            time.sleep(0.2)
+            interrupts[0] += 1
+            raise KeyboardInterrupt
+        real_slice(thread)
+    monkeypatch.setattr(cli, "_join_slice", join_slice)
+    original_close = platform.input.close
+
+    def close():
+        closed_while_running.append(any(t.name == "player" and t.is_alive()
+                                        for t in threading.enumerate()))
+        original_close()
+    platform.input.close = close
+    assert cli.main(["play", path]) == 130
+    assert interrupts[0] == 2
+    assert closed_while_running == [False]
+    assert platform.input.held_keys == set()
+    assert ("release_key", "a") in platform.input.actions
 
 
 def test_play_platform_failure(tmp_path, capsys, monkeypatch, platform):
@@ -358,8 +450,19 @@ def test_ask_zenity(zenity, buttons, code, answer):
         assert "--info" in command
     else:
         assert "--question" in command
-        assert command[command.index("--cancel-label") + 1] == {"ok_cancel": "Cancel",
-                                                                 "yes_no": "No"}[buttons]
+        labels = {"ok_cancel": ("OK", "Cancel"), "yes_no": ("Yes", "No")}[buttons]
+        assert command[command.index("--ok-label") + 1] == labels[0]
+        assert command[command.index("--cancel-label") + 1] == labels[1]
+
+
+def test_ask_zenity_closed_with_the_stop_key_is_not_an_answer(zenity):
+    """Esc closes zenity a moment before the player's stop flag is set."""
+    zenity.code = 1
+    stop = threading.Event()
+    host = cli.CliHost()
+    host.attach(stop.is_set)
+    threading.Timer(0.03, stop.set).start()
+    assert host.ask("", "Continue?", "yes_no") is None
 
 
 def test_ask_zenity_closed_by_stop(zenity):
@@ -491,6 +594,53 @@ def test_record_default_output(tmp_path, capsys, monkeypatch, platform):
     files = list(tmp_path.glob("recording-*.json"))
     assert len(files) == 1
     assert fileformat.load(files[0]).rows[0].type == "window_focus"
+
+
+def test_record_refuses_missing_output_folder(tmp_path, capsys, platform):
+    out = tmp_path / "missing" / "rec.json"
+    assert cli.main(["record", str(out)]) == 1
+    assert capsys.readouterr().err.startswith("Error: cannot write %s: folder " % out)
+    assert platform.listener._callback is None
+    assert not out.exists()
+
+
+def test_record_refuses_folder_as_output(tmp_path, capsys, platform):
+    assert cli.main(["record", str(tmp_path)]) == 1
+    assert "it is a folder" in capsys.readouterr().err
+
+
+def test_record_refuses_unknown_stop_key(tmp_path, capsys, platform):
+    assert cli.main(["record", str(tmp_path / "rec.json"), "--stop-key", "Fsix"]) == 1
+    assert capsys.readouterr().err == "Error: Fsix is not a key name\n"
+    assert platform.listener._callback is None
+
+
+def test_record_failed_save_falls_back(tmp_path, capsys, monkeypatch, platform):
+    monkeypatch.chdir(tmp_path)
+    platform.listener = ScriptedListener(CLICK + [RawEvent("key_press", 0.5, key="F6")])
+    out = tmp_path / "rec.json"
+    real_save = fileformat.save
+
+    def save_fails_for_out(document, path):
+        if str(path) == str(out):
+            raise OSError("disk full")
+        real_save(document, path)
+    monkeypatch.setattr(cli.fileformat, "save", save_fails_for_out)
+    assert cli.main(["record", str(out)]) == 1
+    captured = capsys.readouterr()
+    assert captured.err.startswith("Error: cannot save %s: disk full" % out)
+    files = list(tmp_path.glob("recording-*.json"))
+    assert len(files) == 1
+    assert captured.out.splitlines()[-1].endswith(files[0].name)
+    assert any(r.type == "mouse_click" for r in fileformat.load(files[0]).rows)
+
+
+def test_record_treats_the_terminal_as_its_own_window(tmp_path, monkeypatch, platform):
+    monkeypatch.setenv("WINDOWID", str(0x100))
+    platform.listener = ScriptedListener(CLICK + [RawEvent("key_press", 0.5, key="F6")])
+    out = tmp_path / "rec.json"
+    assert cli.main(["record", str(out)]) == 0
+    assert all(r.type != "window_focus" for r in fileformat.load(out).rows)
 
 
 def test_record_start_failure(tmp_path, capsys, monkeypatch, platform):

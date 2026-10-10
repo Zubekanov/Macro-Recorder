@@ -10,8 +10,17 @@ Decisions where the design is silent:
   on top, and ``record`` the default recording settings, so a command line
   behaves the same whatever the GUI last saved.
 - ``play`` ignores breakpoints: a terminal has no Continue button.
+- ``play`` refuses only errors that affect what runs: errors on rows that
+  play (after the filter, or without it under ``--no-filter``) and label
+  errors, which affect jumps.  Errors on disabled or filtered rows are shown
+  with ``--verbose``.
 - ``record`` without an output path writes ``recording-YYYYmmdd-HHMMSS.json``
-  in the current directory.
+  in the current directory.  The output folder is checked before recording
+  starts; if the save still fails, the rows go to that default name in the
+  current directory or the temporary folder, so a capture is never lost.
+- ``record`` counts the terminal it runs in as its own window when
+  ``$WINDOWID`` names it, so the recording does not start by focusing the
+  terminal.  Terminals that do not set ``$WINDOWID`` still get that row.
 - ``validate`` exits 0 when the file has only warnings.
 """
 
@@ -19,9 +28,11 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import replace
@@ -32,7 +43,7 @@ from macro_recorder.model import fileformat, validate
 from macro_recorder.model.actions.misc import BUTTON_SETS
 from macro_recorder.model.catalogue import spec_for
 from macro_recorder.model.document import MacroDocument
-from macro_recorder.model.keys import display_key, parse_combo
+from macro_recorder.model.keys import display_key, is_modifier, parse_combo
 from macro_recorder.platform import session
 
 if TYPE_CHECKING:
@@ -42,6 +53,7 @@ if TYPE_CHECKING:
 
 POLL_S = 0.05
 ASK_POLL_S = 0.1
+ASK_STOP_GRACE_S = 0.1
 EXIT_ERROR = 1
 EXIT_SESSION = 2
 EXIT_INTERRUPTED = 130
@@ -87,9 +99,18 @@ def make_stop_watcher(input: InputBackend) -> StopKeyWatcher:
     return XI2StopKeyWatcher(synthetic=getattr(input, "synthetic", None))
 
 
+def key_is_known(name: str) -> bool:
+    """True when python-xlib knows ``name`` as a keysym."""
+    from macro_recorder.platform.x11 import keysym_from_name
+    return keysym_from_name(name) != 0
+
+
 # ---------------------------------------------------------------------------
 # The player host
 # ---------------------------------------------------------------------------
+
+BUTTON_LABELS = {"ok": "OK", "cancel": "Cancel", "yes": "Yes", "no": "No"}
+
 
 class CliHost:
     """``PlayerHost`` for a terminal.
@@ -143,8 +164,8 @@ class CliHost:
         if choices == ("ok",):
             command[1:1] = ["--info"]
         else:
-            command[1:1] = ["--question", "--ok-label", choices[0].capitalize(),
-                            "--cancel-label", choices[1].capitalize()]
+            command[1:1] = ["--question", "--ok-label", BUTTON_LABELS[choices[0]],
+                            "--cancel-label", BUTTON_LABELS[choices[1]]]
         proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL)
         while True:
@@ -156,6 +177,11 @@ class CliHost:
                     proc.terminate()
                     proc.wait()
                     return None
+        if code != 0:
+            # Esc or Ctrl+C can close zenity a moment before the stop flag is set.
+            deadline = time.monotonic() + ASK_STOP_GRACE_S
+            while not self._stopped() and time.monotonic() < deadline:
+                _sleep(0.01)
         if self._stopped():
             return None
         return choices[0] if code == 0 else choices[-1]
@@ -203,14 +229,17 @@ def problem_lines(problems: Sequence[validate.Problem]) -> list[str]:
 # ---------------------------------------------------------------------------
 
 def list_lines(document: MacroDocument) -> list[str]:
-    """One line per row: number, enabled marker, delay, label, action, value, comment.
+    """One line per row: number, markers, delay, label, action, value, comment.
 
-    A window row starts a group: a blank line comes before it and the rows
-    of an enabled group are indented under it.
+    The number is in brackets when the filter skips the row.  ``||`` marks a
+    disabled row and ``*`` a breakpoint.  A window row starts a group: a
+    blank line comes before it and the rows of an enabled group are indented
+    under it.
     """
     rows = document.rows
     label_width = max((len(r.label) for r in rows), default=0)
-    number_width = len(str(len(rows)))
+    filtered_rows = {r.id for r in rows if r.enabled and not document.plays(r)}
+    number_width = len(str(len(rows))) + (2 if filtered_rows else 0)
     lines: list[str] = []
     in_group = False
     for number, row in enumerate(rows, 1):
@@ -222,9 +251,13 @@ def list_lines(document: MacroDocument) -> list[str]:
             indent = ""
         else:
             indent = "  " if in_group else ""
-        marker = "  " if row.enabled else "||"
+        if row.id in filtered_rows:
+            number_text = "[%d]" % number
+        else:
+            number_text = ("%d " if filtered_rows else "%d") % number
+        marker = ("  " if row.enabled else "||") + ("*" if row.breakpoint else " ")
         delay = "%d ms" % row.delay_ms if row.delay_ms else ""
-        parts = ["%*d %s %8s" % (number_width, number, marker, delay)]
+        parts = ["%*s %s %8s" % (number_width, number_text, marker, delay)]
         if label_width:
             parts.append("%-*s" % (label_width, row.label))
         parts.append("%s%s: %s" % (indent, spec.name, spec.describe(row)))
@@ -280,11 +313,57 @@ def _stop_key(text: str) -> str:
         raise argparse.ArgumentTypeError(str(e)) from None
     if len(names) != 1:
         raise argparse.ArgumentTypeError("%r is a combination; give one key" % text)
+    if is_modifier(names[0]):
+        raise argparse.ArgumentTypeError("a modifier cannot be the stop key")
     return names[0]
 
 
 def default_output() -> str:
     return time.strftime("recording-%Y%m%d-%H%M%S.json")
+
+
+def output_problem(path: str) -> str | None:
+    """Why ``path`` cannot be written, or None when it can."""
+    if os.path.isdir(path):
+        return "it is a folder"
+    if os.path.exists(path):
+        return None if os.access(path, os.W_OK) else "permission denied"
+    folder = os.path.dirname(os.path.abspath(path))
+    if not os.path.isdir(folder):
+        return "folder %s does not exist" % folder
+    if not os.access(folder, os.W_OK | os.X_OK):
+        return "folder %s is not writable" % folder
+    return None
+
+
+def _save_recording(document: MacroDocument, output: str) -> str | None:
+    """Save to ``output``, else to a fallback file; the path written, or None."""
+    try:
+        fileformat.save(document, output)
+        return output
+    except (OSError, fileformat.FormatError) as e:
+        _error("cannot save %s: %s" % (output, e))
+    name = default_output()
+    for folder in (os.getcwd(), tempfile.gettempdir()):
+        fallback = os.path.join(folder, name)
+        if os.path.abspath(fallback) == os.path.abspath(output):
+            continue
+        try:
+            fileformat.save(document, fallback)
+            return fallback
+        except (OSError, fileformat.FormatError) as e:
+            _error("cannot save %s: %s" % (fallback, e))
+    return None
+
+
+def own_windows() -> session.OwnWindows:
+    """The windows ``record`` treats as its own: the hosting terminal, when known."""
+    own = session.OwnWindows()
+    try:
+        own.add(int(os.environ.get("WINDOWID", "")))
+    except ValueError:
+        pass
+    return own
 
 
 def cmd_record(args: argparse.Namespace) -> int:
@@ -294,9 +373,16 @@ def cmd_record(args: argparse.Namespace) -> int:
     from macro_recorder.engine.recorder import Recorder, RecorderError
     from macro_recorder.model.bundling import rows_from_stream
 
+    if not key_is_known(args.stop_key):
+        _error("%s is not a key name" % args.stop_key)
+        return EXIT_ERROR
     output = args.output or default_output()
+    problem = output_problem(output)
+    if problem is not None:
+        _error("cannot write %s: %s" % (output, problem))
+        return EXIT_ERROR
     try:
-        recorder = Recorder(make_listener(), make_window_manager(), session.own_windows,
+        recorder = Recorder(make_listener(), make_window_manager(), own_windows(),
                             stop_key=args.stop_key)
         recorder.start()
     except (OSError, RecorderError) as e:
@@ -318,16 +404,14 @@ def cmd_record(args: argparse.Namespace) -> int:
     finally:
         recorder.stop()
     rows = rows_from_stream(recorder.result(), RecordingSettings())
-    try:
-        fileformat.save(MacroDocument(rows), output)
-    except (OSError, fileformat.FormatError) as e:
-        _error("cannot save %s: %s" % (output, e))
+    saved = _save_recording(MacroDocument(rows), output)
+    if saved is None:
         return EXIT_ERROR
-    print("Saved %d rows to %s" % (len(rows), output))
+    print("Saved %d rows to %s" % (len(rows), saved))
     if failure is not None:
         _error("%s; what was captured is saved" % failure)
         return EXIT_ERROR
-    return 0
+    return EXIT_ERROR if saved != output else 0
 
 
 # ---------------------------------------------------------------------------
@@ -376,10 +460,36 @@ def playable(document: MacroDocument, no_filter: bool) -> MacroDocument:
                          path_mode=document.path_mode, path=document.path)
 
 
+def _join_slice(thread: threading.Thread) -> None:
+    """Join for one poll interval, so Ctrl+C reaches the main thread."""
+    thread.join(POLL_S)
+
+
 def _wait_for(thread: threading.Thread) -> None:
-    """Join in short slices so Ctrl+C reaches the main thread."""
+    """Join in short slices until the thread ends."""
     while thread.is_alive():
-        thread.join(POLL_S)
+        _join_slice(thread)
+
+
+def _drain(thread: threading.Thread) -> None:
+    """Join until the thread ends, ignoring further Ctrl+C.
+
+    The player releases held input on its way out; the injector must stay
+    open until it has.
+    """
+    while thread.is_alive():
+        try:
+            _join_slice(thread)
+        except KeyboardInterrupt:
+            pass
+
+
+def blocking_problems(document: MacroDocument,
+                      problems: Sequence[validate.Problem]) -> list[validate.Problem]:
+    """Errors that stop ``play``: on rows that play, and every label error."""
+    rows = document.rows
+    return [p for p in problems if p.severity == "error"
+            and (p.key == "label" or document.plays(rows[p.row_index]))]
 
 
 def cmd_play(args: argparse.Namespace) -> int:
@@ -389,16 +499,18 @@ def cmd_play(args: argparse.Namespace) -> int:
     document = _load(args.file)
     if document is None:
         return EXIT_ERROR
-    problems = validate.check(document)
-    errors = [p for p in problems if p.severity == "error"]
+    program = playable(document, args.no_filter)
+    problems = validate.check(program)
+    errors = blocking_problems(program, problems)
     if errors:
         for p in errors:
             print(str(p), file=sys.stderr)
         _error("%s has %d problem(s); not playing" % (args.file, len(errors)))
         return EXIT_ERROR
     if args.verbose:
-        for line in problem_lines(problems):
-            print(line, file=sys.stderr)
+        for p in problems:
+            suffix = "" if p.severity == "warning" else " (row does not play)"
+            print("warning: %s%s" % (p, suffix), file=sys.stderr)
 
     from macro_recorder.engine.player import Player
 
@@ -408,8 +520,9 @@ def cmd_play(args: argparse.Namespace) -> int:
     except OSError as e:
         _error(str(e))
         return EXIT_ERROR
+    thread: threading.Thread | None = None
     try:
-        player = Player(playable(document, args.no_filter), playback_settings(args), host,
+        player = Player(program, playback_settings(args), host,
                         input, make_window_manager(), make_screen(),
                         stop_key_watcher=make_stop_watcher(input))
         host.attach(player.stopped)
@@ -419,14 +532,17 @@ def cmd_play(args: argparse.Namespace) -> int:
             _wait_for(thread)
         except KeyboardInterrupt:
             player.stop()
-            thread.join()
+            _drain(thread)
             print("Stopped", file=sys.stderr)
             return EXIT_INTERRUPTED
     except OSError as e:
         _error(str(e))
         return EXIT_ERROR
     finally:
-        input.close()
+        if thread is not None and thread.is_alive():
+            input.release_all()
+        else:
+            input.close()
     return EXIT_ERROR if host.error else 0
 
 
