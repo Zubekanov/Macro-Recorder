@@ -12,6 +12,7 @@ The helpers above :class:`MainWindow` are Tk-free and unit-tested.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import os
@@ -27,7 +28,7 @@ from typing import Any, Callable, Sequence
 from macro_recorder.engine.recorder import Recorder
 from macro_recorder.gui import dialogs
 from macro_recorder.gui import settings as settings_module
-from macro_recorder.gui.commands import ALL_MODES, IDLE_ONLY, Command, CommandRegistry
+from macro_recorder.gui.commands import IDLE_ONLY, Command, CommandRegistry
 from macro_recorder.gui.hotkeys import HotkeyActions, HotkeyRouter
 from macro_recorder.gui.log_panel import LogPanel
 from macro_recorder.gui.playback import (
@@ -44,13 +45,19 @@ from macro_recorder.model.keys import format_combo, parse_combo
 from macro_recorder.model.protocols import Change, Mode, OverlayShape
 from macro_recorder.platform.session import OwnWindows, SessionProblem
 
+# Interim: the details and overlay modules are optional until they are merged,
+# after which these become plain imports.  Only their absence is tolerated.
 try:
     from macro_recorder.gui.details import DetailsPanel
-except ImportError:
+except ModuleNotFoundError as _missing:
+    if _missing.name != "macro_recorder.gui.details":
+        raise
     DetailsPanel = None
 try:
     from macro_recorder.gui.overlay import Overlay
-except ImportError:
+except ModuleNotFoundError as _missing:
+    if _missing.name != "macro_recorder.gui.overlay":
+        raise
     Overlay = None
 
 log = logging.getLogger(__name__)
@@ -60,6 +67,8 @@ IDLE_PUMP_MS = 200
 BUSY_PUMP_MS = 50
 CLIPBOARD_KEY = "macro_recorder_rows"
 LOCKED_MODES = (Mode.RECORDING, Mode.PLAYING, Mode.PAUSED)
+VIEW_MODES = frozenset(Mode) - {Mode.PAUSED}
+_WHOLE_NUMBER = re.compile(r"[0-9]+")
 FILTER_LABELS = {
     "mouse_move": "Skip mouse moves", "mouse_click": "Skip mouse clicks",
     "mouse_scroll": "Skip mouse scrolls", "keyboard": "Skip keyboard", "wait": "Skip waits",
@@ -175,15 +184,13 @@ def parse_speed(text: str) -> float | None:
 def parse_repeat(text: str) -> int | None:
     """Repeat count: a whole number, 0 meaning until stopped; blank is invalid."""
     text = text.strip()
-    if not text.isdigit():
-        return None
-    return int(text)
+    return int(text) if _WHOLE_NUMBER.fullmatch(text) else None
 
 
 def parse_ms(text: str) -> int | None:
     """A whole number of milliseconds, 0 or more."""
     text = text.strip()
-    return int(text) if text.isdigit() else None
+    return int(text) if _WHOLE_NUMBER.fullmatch(text) else None
 
 
 def clipboard_text(rows: Sequence[Row]) -> str:
@@ -213,6 +220,17 @@ def insertion_index(document: MacroDocument, selected: Sequence[int]) -> int:
         if positions:
             return max(positions) + 1
     return len(document.rows)
+
+
+def ending_edit(document: MacroDocument, command: Command) -> Command:
+    """``command`` changed to end the document's open edit session first, so
+    no command merges into a Details edit's undo step."""
+    run = command.run
+
+    def run_ending_edit(*args: Any) -> Any:
+        document.end_edit()
+        return run(*args)
+    return dataclasses.replace(command, run=run_ending_edit)
 
 
 def shortcut_help(settings: Settings) -> str:
@@ -307,9 +325,6 @@ class _DetailsStub(ttk.Frame):
     def revert_pending(self) -> None:
         pass
 
-    def refresh(self) -> None:
-        pass
-
 
 # ---------------------------------------------------------------------------
 # The window
@@ -336,6 +351,7 @@ class MainWindow:
         self._tracker = OwnWindowTracker(own_windows, resolve_xid or (lambda xid: xid))
         self._resolver = resolve_xid
         self._router: HotkeyRouter | None = None
+        self._hotkeys_grabbed = False
         self._overlay: Any = None
         self._shape: OverlayShape | None = None
         self._paused_row: int | None = None
@@ -374,7 +390,7 @@ class MainWindow:
                 self.commands.set_available(name, False)
         self.commands.subscribe(self._refresh_widgets)
         self.document.subscribe(self._on_document_change)
-        self.root.protocol("WM_DELETE_WINDOW", lambda: self.commands.run("file.exit"))
+        self.root.protocol("WM_DELETE_WINDOW", self.exit)
         self._refresh_widgets()
         self._update_title()
         self._update_footer()
@@ -419,12 +435,15 @@ class MainWindow:
         for kind, payload in batch.player:
             if playback is None:
                 continue
-            if kind == "paused":
-                playback.handle_paused(payload)
-            elif kind == "ask":
-                playback.handle_ask(payload)
-            else:
-                playback.handle_finished(payload)
+            try:
+                if kind == "paused":
+                    playback.handle_paused(payload)
+                elif kind == "ask":
+                    playback.handle_ask(payload)
+                else:
+                    playback.handle_finished(payload)
+            except Exception:
+                log.exception("Handling the player's %r event failed", kind)
         for call in batch.calls:
             try:
                 call()
@@ -441,7 +460,7 @@ class MainWindow:
             return
         self.document.end_edit()
         self.mode = mode
-        if mode in LOCKED_MODES:
+        if mode is not Mode.IDLE:
             self.table.cancel_inline_edit()
             self.details.revert_pending()
         self.details.set_locked(mode is not Mode.IDLE)
@@ -506,7 +525,7 @@ class MainWindow:
                 self._asks.remove(dialog)
             request.reply(answer)
         dialog = dialogs.MessageBoxDialog(self.root, request.title, request.text, request.buttons,
-                                          on_answer=answered)
+                                          on_answer=answered, on_stop=self.stop_playback)
         self._asks.append(dialog)
 
     def _close_asks(self) -> None:
@@ -533,7 +552,7 @@ class MainWindow:
         idle = IDLE_ONLY
         sel = lambda: bool(self.table.selected_ids())
         single = lambda: len(self.table.selected_ids()) == 1
-        reg = self.commands.register
+        reg = self._register
         reg(Command("file.new", "New", self.new_document, idle, "Ctrl+N"))
         reg(Command("file.open", "Open...", self.open_document, idle, "Ctrl+O"))
         reg(Command("file.open_recent", "Open recent", self.open_path, idle))
@@ -541,7 +560,7 @@ class MainWindow:
         reg(Command("file.save_as", "Save As...", self.save_as, idle, "Ctrl+Shift+S"))
         reg(Command("file.settings", "Settings...", self.open_settings, idle,
                     when=lambda: hasattr(settings_module, "open_settings_dialog")))
-        reg(Command("file.exit", "Exit", self.exit, ALL_MODES))
+        reg(Command("file.exit", "Exit", self.exit, idle))
         reg(Command("edit.undo", "Undo", self.undo, idle, "Ctrl+Z",
                     when=lambda: self.document.can_undo))
         reg(Command("edit.redo", "Redo", self.redo, idle, "Ctrl+Y",
@@ -578,9 +597,12 @@ class MainWindow:
                     frozenset({Mode.IDLE, Mode.PAUSED}), "F5"))
         reg(Command("play.stop", "Stop", self.stop_playback,
                     frozenset({Mode.PLAYING, Mode.PAUSED})))
-        reg(Command("view.log", "Output log", self.toggle_log, ALL_MODES))
-        reg(Command("view.overlay", "Overlay", self.toggle_overlay, ALL_MODES))
+        reg(Command("view.log", "Output log", self.toggle_log, VIEW_MODES))
+        reg(Command("view.overlay", "Overlay", self.toggle_overlay, VIEW_MODES))
         reg(Command("help.about", "About", self.show_about, idle))
+
+    def _register(self, command: Command) -> None:
+        self.commands.register(ending_edit(self.document, command))
 
     # -- UI ------------------------------------------------------------------
 
@@ -1082,7 +1104,7 @@ class MainWindow:
         if dialog is None:
             return
         if dialog(self.root, self.settings, self._router):
-            if self._router is not None:
+            if self._router is not None and self._hotkeys_grabbed:
                 self._router.start()
             self._sync_settings_widgets()
 
@@ -1208,6 +1230,8 @@ class MainWindow:
         if ids:
             rows = [self.document.row(i) for i in ids]
             self.document.set_breakpoint(ids, not all(r.breakpoint for r in rows))
+            if self.mode is Mode.PAUSED:
+                self.log_panel.append(["Breakpoint change applies from the next run"])
 
     def select_all(self) -> None:
         self.table.select([r.id for r in self.document.rows])
@@ -1329,15 +1353,27 @@ class MainWindow:
     # -- hotkeys -------------------------------------------------------------
 
     def start_hotkeys(self) -> None:
-        """Grab the global hotkeys and prepare the stop keys; failures go to the log."""
+        """Grab the global hotkeys and prepare the stop keys; failures go to the log.
+
+        The grabber and the stop-key watcher are built independently, so
+        Escape still stops playback when the hotkeys cannot be grabbed.
+        """
         if self.platform is None or self._router is not None:
             return
+        grabber: Any
+        watcher: Any
         try:
             grabber = self.platform.grabber()
+            self._hotkeys_grabbed = True
+        except Exception as e:
+            log.warning("Global hotkeys are unavailable: %s", e)
+            grabber = _NoGrabber()
+        try:
             watcher = self.platform.stop_watcher()
         except Exception as e:
-            log.warning("Global hotkeys and stop keys are unavailable: %s", e)
-            return
+            log.warning("No stop key: Escape will not stop playback and F6 will not stop "
+                        "recording: %s", e)
+            watcher = _NoStopWatcher(str(e))
         actions = HotkeyActions(
             start_record=lambda: self.post("call", lambda: self.commands.run(
                 "record.start", _combo_key(self.settings.hotkeys.record))),
@@ -1348,8 +1384,46 @@ class MainWindow:
         )
         self._router = HotkeyRouter(grabber, watcher, self.settings, lambda: self.mode, actions,
                                     is_blocked=dialogs.modal_active)
-        self._router.start()
+        if self._hotkeys_grabbed:
+            self._router.start()
         self._router.mode_changed(self.mode)
+
+
+class _NoGrabber:
+    """Stands in for the hotkey grabber when it cannot be built, so the router
+    still arms the stop keys.  The router's :meth:`start` is not called on it."""
+
+    def grab(self, combo: str, callback: Callable[[], None]) -> bool:
+        return False
+
+    def ungrab_all(self) -> None:
+        pass
+
+    def suspend(self) -> None:
+        pass
+
+    def resume(self) -> list[str]:
+        return []
+
+    def close(self) -> None:
+        pass
+
+
+class _NoStopWatcher:
+    """Stands in for the stop-key watcher when it cannot be built; arming it
+    fails, which the router logs on every attempt."""
+
+    def __init__(self, reason: str) -> None:
+        self._reason = reason
+
+    def start(self, key: str, callback: Callable[[], None]) -> None:
+        raise OSError(self._reason)
+
+    def stop(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
 
 
 def _combo_key(combo: str) -> str | None:

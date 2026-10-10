@@ -100,6 +100,8 @@ def main(argv: list[str] | None = None) -> int:
         if showing_error[0]:
             return
         showing_error[0] = True
+        # The dialog's grab would block the stop key and the Stop button.
+        window.stop_playback()
         try:
             dialogs.show_message(root, "Error", "%s\n\nDetails are in %s" % (message, log_path))
         finally:

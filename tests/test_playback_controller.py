@@ -357,3 +357,17 @@ def test_ok_cancel_answers_reach_the_player(answer):
     rig.run_to_end()
     # Cancel defaults to End, so the variable is set only after OK.
     assert ("reached" in rig.shell.variables[-1]) == (answer == "ok")
+
+
+def test_shell_returns_to_idle_when_a_finished_callback_fails():
+    rig = Rig([wait_row()])
+
+    def broken_highlight(row_id):
+        if row_id is None:
+            raise RuntimeError("highlight failed")
+    rig.controller._callbacks = replace(rig.controller._callbacks, highlight=broken_highlight)
+    rig.controller.start()
+    with pytest.raises(RuntimeError):
+        rig.run_to_end()
+    assert rig.shell.modes[-1] is Mode.IDLE
+    assert not rig.controller.running

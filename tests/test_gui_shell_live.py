@@ -19,7 +19,7 @@ from macro_recorder.gui.table import LOCKED_TAG, preset_command
 from macro_recorder.model import fileformat
 from macro_recorder.model.catalogue import make
 from macro_recorder.model.document import MacroDocument, make_row
-from macro_recorder.model.protocols import Mode
+from macro_recorder.model.protocols import Mode, RawEvent
 from macro_recorder.platform.session import OwnWindows
 from tests.conftest import FakeHotkeys, FakeInput, FakeListener, FakeScreen, FakeStopKey, FakeWindows
 
@@ -33,6 +33,7 @@ class Shell:
         self.window = window
         self.own = own
         self.messages: list[tuple[str, str]] = []
+        self.listeners: list[FakeListener] = []
         self.unsaved_answer = "cancel"
         self.prompts: list[str] = []
         window.show_message = lambda title, text: self.messages.append((title, text))
@@ -60,13 +61,20 @@ def shell():
     except tk.TclError as e:
         pytest.skip("no display: %s" % e)
     root.withdraw()
+    listeners: list[FakeListener] = []
+
+    def new_listener() -> FakeListener:
+        listener = FakeListener()
+        listeners.append(listener)
+        return listener
     factories = PlatformFactories(windows=FakeWindows, input=FakeInput, screen=FakeScreen,
-                                  listener=FakeListener, stop_watcher=FakeStopKey,
+                                  listener=new_listener, stop_watcher=FakeStopKey,
                                   grabber=FakeHotkeys)
     own = OwnWindows()
     window = MainWindow(root, Settings(), own_windows=own, platform=Platform(factories),
                         save_settings=lambda settings: None)
     rig = Shell(window, own)
+    rig.listeners = listeners
     root.update()
     yield rig
     if not window._closing:
@@ -358,3 +366,191 @@ def test_targeting_round_trip(shell):
     shell.run_until(lambda: delivered)
     assert delivered == [{"x": 10, "y": 20, "colour": "#ff0000"}]
     assert w.mode is Mode.IDLE
+
+
+# -- review follow-ups: Escape in message_box, recording, drag, locked keys ---------
+
+def show(shell) -> None:
+    """Map the window and give the table focus, so generated events arrive."""
+    w = shell.window
+    w.root.deiconify()
+    shell.run_until(lambda: w.root.winfo_ismapped())
+    w.table.tree.focus_force()
+    w.root.update()
+
+
+def row_centre(tree, iid: str) -> tuple[int, int]:
+    x, y, width, height = tree.bbox(iid)
+    return x + width // 2, y + height // 2
+
+
+def test_escape_in_the_message_box_stops_playback(shell):
+    w = shell.window
+    w.document.append([
+        make_row(make("message_box", text="Go?", buttons="yes_no", target_no="no_branch")),
+        wait_row(),
+        make_row(make("var_set", var_name="hit", expr="1"), label="no_branch"),
+    ])
+    w.commands.run("play.play")
+    shell.run_until(lambda: w._asks)
+    dialog = w._asks[0]
+    dialog.focus_force()
+    w.root.update()
+    dialog.event_generate("<Escape>")
+    shell.run_until(lambda: w.mode is Mode.IDLE)
+    assert "Playback stopped" in w.log_panel.text()
+    assert "hit" not in dict(w.log_panel.variables())
+    assert not dialog.winfo_exists()
+
+
+def test_recording_shows_provisional_rows_then_inserts_and_selects(shell):
+    w = shell.window
+    w.document.append([wait_row(1), wait_row(2)])
+    first, second = shell.ids()
+    w.table.select([first])
+    w.root.update()
+    assert w.commands.run("record.start")
+    assert w.mode is Mode.RECORDING
+    assert str(w.table.tree.cget("selectmode")) == "none"
+    listener = shell.listeners[-1]
+    t = time.monotonic()
+    listener.feed(RawEvent("key_press", t, key="a"), RawEvent("key_release", t + 0.05, key="a"))
+    tree = w.table.tree
+
+    def provisional() -> list[str]:
+        return [i for i in tree.get_children() if i.startswith("p")]
+    shell.run_until(lambda: any(tree.set(i, "action") == "Key" for i in provisional()))
+    children = tree.get_children()
+    assert children[0] == str(first)
+    assert children[1].startswith("p")              # after the selected row
+    assert children[-1] == str(second)
+    assert all("recording" in tree.item(i, "tags") for i in provisional())
+    assert w.commands.run("record.stop")
+    assert w.mode is Mode.IDLE
+    assert provisional() == []
+    rows = w.document.rows
+    inserted = tuple(r.id for r in rows[1:-1])
+    assert inserted and rows[0].id == first and rows[-1].id == second
+    assert any(r.type == "key_combo" for r in rows[1:-1])
+    assert w.table.selected_ids() == inserted
+    assert w.commands.run("edit.undo")              # one undo step
+    assert shell.ids() == [first, second]
+
+
+def test_record_toggle_key_starts_and_stops_recording(shell):
+    show(shell)
+    w = shell.window
+    w.table.tree.event_generate("<F9>")
+    w.root.update()
+    assert w.mode is Mode.RECORDING
+    w.commands.run("record.toggle")
+    assert w.mode is Mode.IDLE
+
+
+def test_drag_moves_rows_to_the_drop_line(shell):
+    show(shell)
+    w = shell.window
+    tree = w.table.tree
+    w.document.append([wait_row(1), wait_row(2), wait_row(3), wait_row(4)])
+    w.root.update()
+    ids = shell.ids()
+    x, y = row_centre(tree, str(ids[0]))
+    _x, top, _width, height = tree.bbox(str(ids[2]))
+    target_y = top + height - 2                     # lower half of the third row
+    tree.event_generate("<ButtonPress-1>", x=x, y=y)
+    w.root.update()
+    assert w.table.selected_ids() == (ids[0],)
+    for step in range(y, target_y + 1, 3):
+        tree.event_generate("<B1-Motion>", x=x, y=step, state=0x100)
+        w.root.update()
+    tree.event_generate("<ButtonRelease-1>", x=x, y=target_y, state=0x100)
+    w.root.update()
+    assert shell.ids() == [ids[1], ids[2], ids[0], ids[3]]
+    assert w.table.selected_ids() == (ids[0],)
+    assert w.commands.run("edit.undo")
+    assert shell.ids() == ids
+
+
+def test_locked_table_ignores_keys_and_clicks(shell):
+    show(shell)
+    w = shell.window
+    tree = w.table.tree
+    w.document.append([wait_row(1), wait_row(2), wait_row(3)])
+    ids = shell.ids()
+    w.table.select([ids[0]])
+    w.root.update()
+    w.set_mode(Mode.RECORDING)
+    tree.focus_force()
+    w.root.update()
+    before = w.document.rows
+    for sequence in ("<Delete>", "<Control-a>", "<Down>", "<Alt-Down>", "<KeyPress-c>"):
+        tree.event_generate(sequence)
+        w.root.update()
+    x, y = row_centre(tree, str(ids[2]))
+    tree.event_generate("<ButtonPress-1>", x=x, y=y)
+    tree.event_generate("<ButtonRelease-1>", x=x, y=y)
+    w.root.update()
+    assert w.document.rows == before
+    assert tree.selection() == ()
+    w.commands.run("record.stop")
+    assert w.table.selected_ids() == (ids[0],)
+
+
+def test_root_shortcuts_fire_from_the_table(shell):
+    show(shell)
+    w = shell.window
+    tree = w.table.tree
+    w.document.append([wait_row(1)])
+    w.root.update()
+    tree.event_generate("<Control-z>")
+    w.root.update()
+    assert w.document.rows == ()
+    tree.event_generate("<Control-y>")
+    w.root.update()
+    assert len(w.document.rows) == 1
+    tree.event_generate("<F5>")
+    w.root.update()
+    assert w.mode in (Mode.PLAYING, Mode.IDLE)
+    shell.run_until(lambda: w.mode is Mode.IDLE)
+    assert "Playback finished" in w.log_panel.text()
+
+
+def test_double_click_on_the_number_column_toggles_the_breakpoint(shell):
+    show(shell)
+    w = shell.window
+    tree = w.table.tree
+    w.document.append([wait_row(1), wait_row(2)])
+    w.root.update()
+    target = shell.ids()[1]
+    x, y, _width, height = tree.bbox(str(target), "number")
+    tree.event_generate("<Double-Button-1>", x=x + 5, y=y + height // 2)
+    w.root.update()
+    assert w.document.row(target).breakpoint
+    assert tree.set(str(target), "number").startswith("*")
+    tree.event_generate("<Double-Button-1>", x=x + 5, y=y + height // 2)
+    w.root.update()
+    assert not w.document.row(target).breakpoint
+
+
+def test_toggle_from_the_menu_does_not_merge_into_an_edit_session(shell):
+    w = shell.window
+    w.document.append([wait_row(1)])
+    row = w.document.rows[0]
+    w.table.select([row.id])
+    w.document.begin_edit(row.id, "comment")
+    from dataclasses import replace
+    w.document.replace_row(replace(row, comment="edited"))
+    assert w.commands.run("edit.toggle_enabled")
+    assert w.commands.run("edit.undo")
+    assert w.document.row(row.id).enabled
+    assert w.document.row(row.id).comment == "edited"
+
+
+def test_context_menu_lists_undo_redo_and_select_all(shell):
+    w = shell.window
+    w.document.append([wait_row(1)])
+    w.table._build_context_menu()
+    menu = w.table._context_menu
+    labels = [menu.entrycget(i, "label") for i in range(menu.index("end") + 1)
+              if menu.type(i) == "command"]
+    assert {"Undo", "Redo", "Select All"} <= set(labels)

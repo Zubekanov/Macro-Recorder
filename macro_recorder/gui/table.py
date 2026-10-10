@@ -46,9 +46,11 @@ DRAG_THRESHOLD_PX = 5
 LOCKED_TAG = "MacroRecorderLockedTable"
 
 EDIT_MENU = (
+    ("edit.undo", "Undo"), ("edit.redo", "Redo"), None,
     ("edit.cut", "Cut"), ("edit.copy", "Copy"), ("edit.paste", "Paste"),
     ("edit.delete", "Delete"), None, ("edit.split", "Split path"),
     ("edit.toggle_enabled", "Toggle enabled"), ("edit.toggle_breakpoint", "Toggle breakpoint"),
+    None, ("edit.select_all", "Select All"),
     None, ("edit.edit_label", "Edit label"), ("edit.edit_comment", "Edit comment"),
 )
 
@@ -93,14 +95,20 @@ def number_text(index: int, row: Row, filtered: bool, playing: bool = False) -> 
 
 
 def row_cells(index: int, row: Row, filtered: bool, playing: bool = False) -> tuple[str, ...]:
+    """The five cells of a document row."""
+    return cells(number_text(index, row, filtered, playing), row, "Row %d" % (index + 1))
+
+
+def cells(number: str, row: Row, where: str) -> tuple[str, ...]:
+    """The cells of ``row`` with ``number`` in the number column; a row that
+    cannot be described shows ``?`` and is logged under ``where``."""
     spec = catalogue.spec_for(row)
     try:
         value = spec.describe(row)
     except Exception as e:          # a bad row must not break the table
-        log.warning("Row %d: cannot describe the row: %s", index + 1, e)
+        log.warning("%s: cannot describe the row: %s", where, e)
         value = "?"
-    return (number_text(index, row, filtered, playing), spec.name, value, row.label,
-            _one_line(row.comment))
+    return (number, spec.name, value, row.label, _one_line(row.comment))
 
 
 def row_tags(row: Row, group: int | None, filtered: bool) -> tuple[str, ...]:
@@ -283,10 +291,8 @@ class ActionTable(ttk.Frame):
         del self._provisional_iids[keep:]
         for offset, row in enumerate(rows[keep:], keep):
             iid = "p%d" % next(self._provisional_ids)
-            spec = catalogue.spec_for(row)
             self.tree.insert("", self._provisional_base + offset, iid=iid, tags=("recording",),
-                             values=(PROVISIONAL_MARK, spec.name, spec.describe(row),
-                                     row.label, _one_line(row.comment)))
+                             values=cells(PROVISIONAL_MARK, row, "Recorded row %d" % (offset + 1)))
             self._provisional_iids.append(iid)
         self._provisional = list(rows)
         if self._provisional_iids:
@@ -656,6 +662,7 @@ class ActionTable(ttk.Frame):
             self.cancel_inline_edit()
             return "break"
         row = self._document.row(editor.row_id)
+        self._document.end_edit()
         if editor.column == "label":
             problem = label_problem(text, self._document, editor.row_id)
             if problem:

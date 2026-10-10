@@ -340,21 +340,24 @@ class PlaybackController:
         self._callbacks.show_ask(request)
 
     def handle_finished(self, payload: tuple[str | None, Mapping[str, Any]]) -> None:
+        """Tidy up after a run.  The shell returns to idle even when a callback fails."""
         error, variables = payload
         thread = self._thread
         self._player = self._host = self._thread = None
         self._paused = False
+        stop_requested, self._stop_requested = self._stop_requested, False
         if thread is not None:
             thread.join(1.0)
-        self._callbacks.close_asks()
-        self._callbacks.highlight(None)
-        self._callbacks.set_mode(Mode.IDLE)
+        try:
+            self._callbacks.close_asks()
+            self._callbacks.highlight(None)
+        finally:
+            self._callbacks.set_mode(Mode.IDLE)
         self._callbacks.show_variables(variables)
         if error:
             self._callbacks.report_error(error)
         else:
-            self._callbacks.log("Playback stopped" if self._stop_requested else "Playback finished")
-        self._stop_requested = False
+            self._callbacks.log("Playback stopped" if stop_requested else "Playback finished")
 
     # -- worker thread -------------------------------------------------------
 

@@ -133,14 +133,22 @@ def show_message(master: tk.Misc, title: str, message: str) -> None:
 
 class MessageBoxDialog(_ButtonDialog):
     """The message_box action's dialog: topmost and not modal, so the pump keeps
-    running.  Closing it counts as the last button (Cancel or No)."""
+    running.  Closing it counts as the last button (Cancel or No); Escape
+    answers nothing and calls ``on_stop``, which stops playback."""
 
     def __init__(self, master: tk.Misc, title: str, text: str, buttons: str,
-                 on_answer: Callable[[str], None]) -> None:
+                 on_answer: Callable[[str], None], on_stop: Callable[[], None]) -> None:
         super().__init__(master, title or "Macro Recorder", text, ask_buttons(buttons),
                          on_answer=on_answer, topmost=True)
+        self._on_stop = on_stop
+        self.bind("<Escape>", self._escape)
         self.lift()
         self.focus_force()
+
+    def _escape(self, event: tk.Event) -> str:
+        self.close()
+        self._on_stop()
+        return "break"
 
 
 def ask_open_path(master: tk.Misc, folder: str) -> str:

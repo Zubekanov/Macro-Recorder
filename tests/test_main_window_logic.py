@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import queue
 import threading
@@ -11,14 +12,19 @@ import pytest
 from macro_recorder import app
 from macro_recorder.gui.log_panel import variable_rows
 from macro_recorder.gui.main_window import (
-    EventBatch, OwnWindowTracker, Stopwatch, clipboard_text, display_name, drain,
-    format_elapsed, insertion_index, parse_ms, parse_repeat, parse_speed, recent_entries,
-    rows_from_clipboard, shortcut_help, window_title,
+    EventBatch, OwnWindowTracker, Stopwatch, _NoGrabber, _NoStopWatcher, clipboard_text,
+    display_name, drain, ending_edit, format_elapsed, insertion_index, parse_ms, parse_repeat,
+    parse_speed, recent_entries, rows_from_clipboard, shortcut_help, window_title,
 )
+from macro_recorder.gui.commands import IDLE_ONLY, Command
+from macro_recorder.gui.hotkeys import HotkeyActions, HotkeyRouter
+from macro_recorder.model.protocols import Mode
 from macro_recorder.gui.settings import Settings
 from macro_recorder.gui.table import (
-    drop_position, number_text, remaining_index, row_tags, shifted_index, window_groups,
+    EDIT_MENU, cells, drop_position, number_text, remaining_index, row_tags, shifted_index,
+    window_groups,
 )
+from tests.conftest import FakeStopKey
 from macro_recorder.model.catalogue import make
 from macro_recorder.model.document import MacroDocument, make_row
 from macro_recorder.model.fileformat import FormatError
@@ -146,7 +152,8 @@ def test_parse_speed(text, value):
 
 
 @pytest.mark.parametrize("text, value", [("0", 0), ("3", 3), ("", None), (" ", None),
-                                         ("1.5", None), ("-1", None), ("x", None)])
+                                         ("1.5", None), ("-1", None), ("x", None),
+                                         ("\u00b2", None), ("\u0663", None)])
 def test_parse_repeat_blank_is_invalid_and_zero_means_until_stopped(text, value):
     assert parse_repeat(text) == value
 
@@ -154,6 +161,70 @@ def test_parse_repeat_blank_is_invalid_and_zero_means_until_stopped(text, value)
 def test_parse_ms():
     assert parse_ms("5000") == 5000
     assert parse_ms("") is None and parse_ms("1.5") is None
+    assert parse_ms("\u00b2") is None and parse_ms("\u0663") is None
+
+
+# -- commands and edit sessions ----------------------------------------------------
+
+def test_commands_end_the_open_edit_session_before_running():
+    row = wait_row(10)
+    document = MacroDocument([row])
+    document.begin_edit(row.id, "comment")
+    document.replace_row(dataclasses.replace(row, comment="edited"))
+    command = ending_edit(document, Command(
+        "edit.toggle_enabled", "Toggle enabled",
+        lambda: document.set_enabled([row.id], False), IDLE_ONLY))
+    command.run()
+    document.undo()
+    assert document.row(row.id).enabled
+    assert document.row(row.id).comment == "edited"
+
+
+def test_context_menu_has_the_edit_menu_items_in_order():
+    names = [item[0] for item in EDIT_MENU if item is not None]
+    edit_menu = ["edit.undo", "edit.redo", "edit.cut", "edit.copy", "edit.paste", "edit.delete",
+                 "edit.split", "edit.toggle_enabled", "edit.toggle_breakpoint",
+                 "edit.select_all"]
+    assert [n for n in names if n in edit_menu] == edit_menu
+
+
+def test_cells_survive_a_row_that_cannot_be_described(monkeypatch, caplog):
+    from macro_recorder.model import catalogue
+    row = wait_row(10)
+    spec = catalogue.spec_for(row)
+
+    def broken(r):
+        raise ValueError("bad")
+    monkeypatch.setattr(catalogue, "spec_for", lambda r: dataclasses.replace(spec, describe=broken))
+    with caplog.at_level(logging.WARNING):
+        assert cells("+", row, "Recorded row 1")[2] == "?"
+    assert "Recorded row 1" in caplog.text
+
+
+# -- stop keys without a grabber ---------------------------------------------------
+
+def _router(grabber, watcher, mode, stops):
+    actions = HotkeyActions(start_record=lambda: None, stop_record=lambda t: stops.append(t),
+                            play=lambda: None, resume=lambda: None,
+                            stop_play=lambda: stops.append("play"))
+    return HotkeyRouter(grabber, watcher, Settings(), lambda: mode[0], actions)
+
+
+def test_escape_still_stops_playback_without_a_grabber():
+    watcher = FakeStopKey()
+    stops: list[str] = []
+    mode = [Mode.PLAYING]
+    router = _router(_NoGrabber(), watcher, mode, stops)
+    router.mode_changed(Mode.PLAYING)
+    watcher.press()
+    assert stops == ["play"]
+
+
+def test_missing_stop_watcher_is_logged_on_arming(caplog):
+    router = _router(_NoGrabber(), _NoStopWatcher("no XInput2"), [Mode.PLAYING], [])
+    with caplog.at_level(logging.WARNING):
+        router.mode_changed(Mode.PLAYING)
+    assert "Stop key Escape unavailable: no XInput2" in caplog.text
 
 
 # -- clipboard and insertion ------------------------------------------------------
